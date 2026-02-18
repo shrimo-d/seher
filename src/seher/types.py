@@ -13,6 +13,7 @@ Parameter = TypeVar("Parameter")
 PolicyCarry = TypeVar("PolicyCarry")
 ProblemData = TypeVar("ProblemData")
 State = TypeVar("State")
+Observation = TypeVar("Observation")
 
 
 class MDP[State, Control, Cost](Protocol):
@@ -407,3 +408,70 @@ class StateCritic[State](Protocol):
 
         """
         ...
+
+class StateEstimator[State, Observation](Protocol):
+    """Protocol for state estimators/filters.
+    
+    A state estimator estimates the current state of a system from noisy
+    or partial observations.
+    """
+
+    def __call__(self, observation: Observation, key: JaxRandomKey) -> State:
+        """Estimate the current state from an observation.
+        
+        Parameters
+        ----------
+        observation:
+            The observation to estimate the state from.
+        key:
+            RNG for all downstream stochasticity.
+        
+        Returns
+        -------
+        state:
+            The estimated state.
+        """
+        ...
+    
+    def initial_state(self, observation: Observation, key: JaxRandomKey) -> State:
+        """Return an initial state estimate.
+        
+        Parameters
+        ----------
+        key:
+            RNG for all downstream stochasticity
+        
+        Returns
+        -------
+        state:
+            Initial state estimate.
+        """
+        ...
+
+    #Not every State-Estimator needs an update i guess
+    #def update(self, observation: Observation, key: JaxRandomKey) -> None:
+    #    """Update the state estimator parameters.
+    #    
+    #    Parameters
+    #    ----------
+    #    observation:
+    #        The current observation.
+    #    key:
+    #        RNG for all downstream stochasticity.
+    #    """
+    #    ...
+
+    #def reset(self, key: JaxRandomKey) -> State:
+    #    """Reset the state estimator.
+    #    
+    #    Parameters
+    #    ----------
+    #    key:
+    #        RNG for all downstream stochasticity.
+    #    
+    #    Returns
+    #    -------
+    #    state:
+    #        New initial state estimate.
+    #    """
+    #    ...

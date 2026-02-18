@@ -33,6 +33,7 @@ from seher.types import (
     JaxRandomKey,
     Policy,
     StateCritic,
+    StateEstimator,
 )
 
 from .tanh_gaussian_policy_mdp import (
@@ -207,6 +208,7 @@ class BaseSolver[ProblemType](abc.ABC):
         n_steps: int = 100,
         n_simulations: int = 1,
         key: JaxRandomKey | None = None,
+        state_estimator: StateEstimator | None = None,
     ) -> History:
         """Simulate the learned policy."""
         if not self.prepared:
@@ -218,15 +220,24 @@ class BaseSolver[ProblemType](abc.ABC):
         if key is None:
             key = jr.PRNGKey(0)
 
-        if self._jit_batch_simulate is None:
-            # XXX When we move beyond MDPs, we will have to adapt simulate.
-            problem = cast(MDP, self.problem)
+        problem = self.problem
 
-            this_simulate = functools.partial(simulate, problem)
+        if (
+            self._jit_batch_simulate is None
+            or self._cached_estimator is not state_estimator
+        ):
+            
+            this_simulate = functools.partial(
+                simulate,
+                problem,
+                state_estimator=state_estimator
+            )
+
             self._jit_batch_simulate = jax.jit(
                 jax.vmap(this_simulate, in_axes=(None, None, 0)),
-                static_argnums=(1, 6, 7, 8, 9),
+                static_argnums=(1,),
             )
+            self._cached_estimator = state_estimator
 
         keys = jr.split(key, n_simulations)
         return self._jit_batch_simulate(self.policy, n_steps, keys)
@@ -251,9 +262,9 @@ class BaseSolver[ProblemType](abc.ABC):
         history = jit_batch_simulate(self.problem, self.policy, n_steps, keys)
 
         # XXX Undo this cast when we move beyond MDPs.
-        problem = cast(MDP, self.problem)
+        #problem = cast(MDP, self.problem)
 
-        discount_factors = problem.discount ** jax.numpy.arange(n_steps)
+        discount_factors = self.problem.discount ** jax.numpy.arange(n_steps)
         discounted_costs = (discount_factors * history.costs).sum(axis=1)
         return float(discounted_costs.mean())
 

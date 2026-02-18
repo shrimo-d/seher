@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from flax.struct import dataclass
 
-from ..types import MDP, JaxRandomKey
+from ..types import MDP, POMDP, JaxRandomKey
 
 
 @dataclass
@@ -33,8 +33,10 @@ class PendulumState:
         discontinuous or "wrapped" representation based on radians.
 
         """
+        angle = jnp.atleast_1d(self.angle)
+        velocity = jnp.atleast_1d(self.velocity)
         return jnp.concatenate(
-            [jnp.cos(self.angle), jnp.sin(self.angle), self.velocity]
+            [jnp.cos(angle), jnp.sin(angle), velocity], axis=-1
         )
 
     @property
@@ -46,7 +48,41 @@ class PendulumState:
             - jnp.pi
         )
         return result
+    
+@dataclass
+class PendulumObservation:
+    """Observation of partially observable pendulum.
+    
+    Attributes
+    ----------
+    angle:
+        Angle of the pendulum in radians. `0.0` means facing upwards.
+    
+    """
+    angle: jax.Array
 
+    def cos_sin_repr(self) -> jax.Array:
+        """Return cosinus/sinus representation of the observation.
+        
+        The first component is the cos of the angle, the second its sine.
+        This representation is locally Euclidean, which means that it is
+        a better input to a neural network than the either a discontinuous
+        or "wrapped" representation based on radians.
+
+        """
+        return jnp.concatenate(
+            [jnp.cos(self.angle), jnp.sin(self.angle)]
+        )
+
+    @property
+    def angle_normed(self) -> jax.Array:
+        """Return the normalised angle."""
+        result = (
+            (self.angle + jnp.pi)
+            - ((self.angle + jnp.pi) // (2 * jnp.pi)) * (2 * jnp.pi)
+            - jnp.pi
+        )
+        return result
 
 @dataclass
 class Pendulum:
@@ -182,3 +218,28 @@ class PendulumSwingup(Pendulum, SwingupMixin):
     """Pendulum with a dense cost that starts in resting position."""
 
     pass
+
+class PartiallyObservablePendulum(Pendulum):
+    """A POMDP version of the pendulum where only the angle is observed.
+    
+    Only the angle (position) is observed; the angular velocity is hidden.
+
+    """
+
+    def init(self, key: JaxRandomKey) -> PendulumState:  # noqa: D102
+        angle_key, velocity_key = jr.split(key)
+
+        initial_angle = jax.random.uniform(
+            angle_key, minval=-jnp.pi, maxval=jnp.pi, shape=(1,)
+        )
+        initial_velocity = jax.random.uniform(
+            velocity_key, minval=-8, maxval=8, shape=(1,)
+        )
+        return PendulumState(angle=initial_angle, velocity=initial_velocity)
+
+    def emit(self, state: PendulumState, control: jax.Array, key: JaxRandomKey) -> PendulumObservation:
+        new_state = self.transit(state, control, key)
+        obs = PendulumObservation(angle=new_state.angle)
+        return obs
+    
+    emit.__doc__ = POMDP.emit.__doc__
