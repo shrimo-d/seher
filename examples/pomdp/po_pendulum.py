@@ -42,7 +42,7 @@ def objective(trial):
 
     solution = solver.solve(problem, key)
 
-    final_cost = solver.history.costs[:,-1,:].mean()
+    final_cost = solver.history.costs[:, -1, :].mean()
 
     return float(final_cost)
 

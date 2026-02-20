@@ -97,7 +97,7 @@ class JointBeliefPolicySolver(BaseSolver[POMDP]):
             array_to_state=self.array_to_state,
             obs_dim=obs_dim,
             state_dim=self.state_dim,
-            key=key,
+            key=belief_key,
             **self.belief_mlp_kws
         )
 
