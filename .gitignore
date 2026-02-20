@@ -14,3 +14,6 @@ wheels/
 *.sqlite3
 *.dill
 *.gif
+
+# Mac files
+.DS_Store
