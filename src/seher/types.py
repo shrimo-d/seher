@@ -11,6 +11,7 @@ Control = TypeVar("Control")
 Cost = TypeVar("Cost")
 Parameter = TypeVar("Parameter")
 PolicyCarry = TypeVar("PolicyCarry")
+Carry = TypeVar("Carry")
 ProblemData = TypeVar("ProblemData")
 State = TypeVar("State")
 Observation = TypeVar("Observation")
@@ -223,6 +224,12 @@ class POMDP[
     Combination of an MDP and an SSM.
     """
 
+    def initial_observation(self, state):
+        """Return the observation of an initial state.
+        
+        """
+        ...
+
     pass
 
 
@@ -409,14 +416,14 @@ class StateCritic[State](Protocol):
         """
         ...
 
-class StateEstimator[State, Observation](Protocol):
+class StateEstimator[State, Observation, Carry](Protocol):
     """Protocol for state estimators/filters.
     
     A state estimator estimates the current state of a system from noisy
     or partial observations.
     """
 
-    def __call__(self, observation: Observation, key: JaxRandomKey) -> State:
+    def __call__(self, carry: None, observation: Observation, key: JaxRandomKey) -> State:
         """Estimate the current state from an observation.
         
         Parameters
@@ -447,31 +454,9 @@ class StateEstimator[State, Observation](Protocol):
             Initial state estimate.
         """
         ...
-
-    #Not every State-Estimator needs an update i guess
-    #def update(self, observation: Observation, key: JaxRandomKey) -> None:
-    #    """Update the state estimator parameters.
-    #    
-    #    Parameters
-    #    ----------
-    #    observation:
-    #        The current observation.
-    #    key:
-    #        RNG for all downstream stochasticity.
-    #    """
-    #    ...
-
-    #def reset(self, key: JaxRandomKey) -> State:
-    #    """Reset the state estimator.
-    #    
-    #    Parameters
-    #    ----------
-    #    key:
-    #        RNG for all downstream stochasticity.
-    #    
-    #    Returns
-    #    -------
-    #    state:
-    #        New initial state estimate.
-    #    """
-    #    ...
+    
+    def initial_carry(self) -> Carry:
+        """Return the carry for the first time step.
+        
+        """
+        ...

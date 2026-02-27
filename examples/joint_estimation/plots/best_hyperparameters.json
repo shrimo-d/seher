@@ -1,0 +1,8 @@
+{
+    "seed": 7316,
+    "learning_rate": 0.0024613295147667656,
+    "hidden_size": 40,
+    "window_size": 6,
+    "latent_dim": 16,
+    "layers": 1
+}

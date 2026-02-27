@@ -17,10 +17,11 @@ class MLPStateEstimator[Observation, State]:
 
     def __call__(
             self,
+            carry: None,
             observation: Observation,
             key: JaxRandomKey,
     ) -> State:
-        del key
+        del key, carry
         inpt_arr = self.obs_to_array(observation)
         result_arr = self.mlp(inpt_arr)
         state = self.array_to_state(result_arr)
@@ -29,4 +30,4 @@ class MLPStateEstimator[Observation, State]:
     __call__.__doc__ = StateEstimator.__call__.__doc__
 
     def initial_state(self, observation: Observation, key: JaxRandomKey):
-        return self(observation, key)
+        return self(None, observation, key)

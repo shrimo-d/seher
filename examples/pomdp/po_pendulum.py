@@ -53,3 +53,11 @@ study.optimize(objective, n_trials=50)
 print("best:trial")
 print(study.best_trial.params)
     
+#Ich muss in simulate sichergehen, dass control ein TanhGaussianPolicyControl bleibt, aber anscheinend wird
+#es zu einem ShapedArray. Außerdem: TanhGaussianPolicyMDP hat kein emit -> Muss eine funktion hinzufügen, 
+#damit pomdp damit möglich.
+#Shaped array passiert, weil empty_control von tanhgaussianPolicyMDP ein TanhGaussianPolicyControl objekt liefert
+#aber die Simulation Policy einen array.
+
+#Muss es glaub umschreiben, sodass ein POMDP die funktion state-to-obs hat anstatt emit. Besonders wenn non-det
+#erministische Prozesse kommen (Roboter könnten so sein, weil gleiche control nicht immer gleicher State bedeutet)

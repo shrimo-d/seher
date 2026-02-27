@@ -58,6 +58,21 @@ class TanhGaussianPolicyState[OriginalState, ConcreteControl]:
     original_state: OriginalState
     last_control: ConcreteControl
 
+@dataclass
+class TanhGaussianPolicyObservation[OriginalObservation, ConcreteControl]:
+    """Augmented observation for tanh-Gaussian policy POMDP.
+    
+    Attributes
+    ----------
+    original_obs:
+        Observation from the original POMDP.
+    last_control:
+        Last concrete control that was sampled and applied.
+    
+    """
+
+    original_observation: OriginalObservation
+    last_control: ConcreteControl
 
 @dataclass
 class SimulationPolicy[Observation, Carry]:
@@ -141,9 +156,17 @@ def _sample_concrete_control(
     Concrete control values bounded in `[control_min, control_max]`.
 
     """
+    if hasattr(control, "loc") and hasattr(control, "inv_softplus_scale"):
+        loc = control.loc
+        scale = jax.nn.softplus(control.inv_softplus_scale - 1) + 1e-4
+    else:
+        dim = control.shape[-1] // 2
+        loc = control[..., :dim]
+        inv_softplus_scale = control[..., dim:]
+        scale = jax.nn.softplus(inv_softplus_scale - 1) + 1e-4
     # Sample from Gaussian and apply tanh transformation to box constraints
-    gaussian_sample = control.loc + control.scale * jr.normal(
-        key, control.loc.shape
+    gaussian_sample = loc + scale * jr.normal(
+        key, loc.shape
     )
     tanh_sample = jnp.tanh(gaussian_sample)
 
@@ -294,6 +317,36 @@ class TanhGaussianPolicyMDP[OriginalState, Cost]:
             inv_softplus_scale=jax.tree.map(jnp.zeros_like, original_control),
         )
 
+class TanhGaussianPolicyPOMDP[OriginalState, Cost](
+    TanhGaussianPolicyMDP[OriginalState, Cost]
+):
+    def emit(self, state, control, key):
+        """emit is called later than transit. So we need to use
+        state.last_control as input.
+        
+        """
+        sample_key, transit_key = jr.split(key, 2)
+
+        concrete_control = state.last_control
+
+        new_original_obs = self.original_mdp.emit(
+            state.original_state, concrete_control, transit_key
+        )
+
+        return TanhGaussianPolicyObservation(
+            original_observation=new_original_obs,
+            last_control=concrete_control,
+        )
+
+    def initial_observation(self, state):
+        original_state = state.original_state
+        initial_obs = self.original_mdp.initial_observation(original_state)
+
+        return TanhGaussianPolicyObservation(
+            original_observation=initial_obs,
+            last_control=state.last_control
+        )
+
 
 def compute_tanh_gaussian_policy_log_probs(
     history: History[
@@ -393,6 +446,10 @@ def convert_tanh_gaussian_history_to_original(
     """
     # Extract original states
     original_states = augmented_history.states.original_state
+    # Extract original observations
+    original_obs = augmented_history.observations.original_observation
+    # Extract original state estimates
+    original_estimates = augmented_history.estimated_states
 
     # Extract concrete controls that were actually applied
     # The key insight: last_control[t] contains the control that was applied
@@ -415,7 +472,10 @@ def convert_tanh_gaussian_history_to_original(
 
     return History(
         states=original_states,
+        observations=original_obs,
+        estimated_states=original_estimates,
         controls=concrete_controls,
         costs=augmented_history.costs,
         policy_carries=augmented_history.policy_carries,
+        state_estimator_carries=augmented_history.state_estimator_carries,
     )

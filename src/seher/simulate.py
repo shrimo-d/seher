@@ -20,6 +20,7 @@ from seher.types import (
     JaxRandomKey,
     Policy,
     PolicyCarry,
+    Carry,
     State,
     Observation,
     StateEstimator,
@@ -123,9 +124,11 @@ class History[State, Control, Cost, PolicyCarry]:
     """
 
     states: State
+    observations: Observation | None
     controls: Control
     costs: Cost
     policy_carries: PolicyCarry
+    state_estimator_carries: Carry | None
     estimated_states: State | None
 
 
@@ -136,8 +139,9 @@ def simulate(
     key: JaxRandomKey,
     initial_state: State | None = None,
     initial_policy_carry: PolicyCarry | None = None,
+    initial_state_estimator_carry: Carry | None = None,
     callback: SimulateCallback[State, PolicyCarry, Control] | None = None,
-    state_estimator: StateEstimator[Observation, State] | None = None,
+    state_estimator: StateEstimator[Observation, State, Carry] | None = None,
     jit_policy: bool = True,
     jit_init: bool = True,
     jit_transit: bool = True,
@@ -162,6 +166,9 @@ def simulate(
     initial_policy_carry:
         Policy carries to start policies from. If not given, use the default
         initial policy carry.
+    initial_state_estimator_carry:
+        State Estimator carries to start state estimators from. None if no
+        carry is given.
     callback:
         Will be called after each iteration.
     state_estimator:
@@ -202,20 +209,25 @@ def simulate(
         initial_policy_carry = policy.initial_carry()
 
     initial_control = mdp.empty_control()
+    initial_observation = mdp.initial_observation(initial_state) if hasattr(mdp, "initial_observation") \
+                          else None
 
     if state_estimator is None:
-        initial_belief = initial_state
+        initial_estimate = initial_state
     else:
-        initial_belief = state_estimator.initial_state(call_emit(initial_state, initial_control,init_key), init_key)
+        initial_estimate = state_estimator.initial_state(initial_observation, init_key)
 
     def scan_step(carry, _):
-        i_step, true_state, belief_state, policy_carry, control, key = carry
+        i_step, true_state, observation, state_estimate, policy_carry, se_carry, control, key = carry
 
         policy_key, transit_key, emit_key, cost_key, key = jr.split(key, 5)
 
+        if state_estimate is None:
+            state_estimate = true_state
+
         policy_carry, control = call_policy(
             carry=policy_carry,
-            obs=belief_state,
+            obs=state_estimate,
             control=control,
             key=policy_key,
         )
@@ -224,35 +236,38 @@ def simulate(
         state_p1 = call_transit(state=true_state, control=control, key=transit_key)
 
         if call_emit is not None:
-            observation = call_emit(state=state_p1, control=control, key=emit_key)
+            observation_p1 = call_emit(state=true_state, control=control, key=emit_key)
             if state_estimator is not None:
-                state_estimate = call_estimate(observation, key)
+                se_carry, state_estimate = call_estimate(se_carry, observation_p1, key)
             else:
                 state_estimate = state_p1
         else:
-            observation = state_p1
+            observation_p1 = None
             state_estimate = state_p1
 
         if callback is not None:
             jax.experimental.io_callback(
-                callback, None, i_step, true_state, belief_state, policy_carry, control, cost
+                callback, None, i_step, true_state, observation_p1, state_estimate, policy_carry,
+                se_carry, control, cost
             )
 
-        new_carry = (i_step + 1, state_p1, state_estimate, policy_carry, control, key)
-        outputs = (state_p1, state_estimate, control, cost, policy_carry)
+        new_carry = (i_step + 1, state_p1, observation_p1, state_estimate, policy_carry, se_carry, control, key)
+        outputs = (state_p1, observation_p1, state_estimate, control, cost, policy_carry, se_carry)
 
         return new_carry, outputs
 
     initial_carry = (
         0,
         initial_state,
-        initial_belief,
+        initial_observation,
+        initial_estimate,
         initial_policy_carry,
+        initial_state_estimator_carry,
         initial_control,
         key,
     )
 
-    _, (states, estimated_states, controls, costs, policy_carries) = jax.lax.scan(
+    _, (states, observations, estimated_states, controls, costs, policy_carries, se_carries) = jax.lax.scan(
         scan_step,
         initial_carry,
         None,  # Not needed since we're just iterating n_steps times.
@@ -261,9 +276,11 @@ def simulate(
 
     result = History(
         states=states,
+        observations=observations,
         controls=controls,
         costs=costs,
         policy_carries=policy_carries,
+        state_estimator_carries=se_carries,
         estimated_states=estimated_states
     )
 
@@ -280,38 +297,43 @@ def init_or_persist(
     steps_since_init: jax.Array,
     steps_per_init: int,
     key: JaxRandomKey,
+    state_estimator: StateEstimator[State, Observation, Carry] | None = None,
 ) -> tuple[State, PolicyCarry]:
     """Initialize new episode or persist from last history."""
     key, init_key = jr.split(key)
 
     def init(key):
-        return mdp.init(key), policy.initial_carry()
+        se_carry = None
+        if state_estimator is not None:
+            se_carry = state_estimator.initial_carry()
+        return mdp.init(key), policy.initial_carry(), se_carry
 
     def persist(key):
         if last_history is None:
             raise ValueError(".last_history must be set")
         states = jt.map(lambda x: x[-1], last_history.states)
         policy_carries = jt.map(lambda x: x[-1], last_history.policy_carries)
+        se_carries = jt.map(lambda x: x[-1], last_history.state_estimator_carries)
 
-        return states, policy_carries
+        return states, policy_carries, se_carries
 
-    initial_state, initial_policy_carry = jl.cond(
+    initial_state, initial_policy_carry, initial_se_carry = jl.cond(
         (steps_since_init % steps_per_init != 0),
         persist,
         init,
         init_key,
     )
 
-    return initial_state, initial_policy_carry
+    return initial_state, initial_policy_carry, initial_se_carry
 
 
-@functools.partial(jax.vmap, in_axes=(None, None, 0))
-@functools.partial(jax.vmap, in_axes=(None, None, 0))
+@functools.partial(jax.vmap, in_axes=(None, None, 0, None))
+@functools.partial(jax.vmap, in_axes=(None, None, 0, None))
 def create_empty_history(
     mdp: MDP[State, Control, Cost] | POMDP[State, Control, Observation, Cost],
     policy: Policy[State, PolicyCarry, Control],
     key: JaxRandomKey,
-    state_estimator: StateEstimator[State, Observation] | None = None
+    state_estimator: StateEstimator[State, Observation, Carry] | None = None
 ) -> History[State, Control, Cost, PolicyCarry]:
     """Create empty history structure for initialization."""
     # Create a zero-like cost structure by running cost once and mapping to
@@ -322,15 +344,20 @@ def create_empty_history(
     zero_cost = jax.tree_util.tree_map(jnp.zeros_like, temp_cost)
 
     if state_estimator is None:
+        temp_obs=None
         estimated_states = None
+        initial_se_carry = None
     else:
-        temp_obs = mdp.emit(temp_state, temp_control, key)
-        estimated_states = state_estimator(temp_obs, key)
+        temp_obs = mdp.initial_observation(temp_state)
+        initial_se_carry = state_estimator.initial_carry()
+        estimated_states = state_estimator(initial_se_carry, temp_obs, key)
 
     return History(
         states=mdp.init(key),
+        observations=temp_obs,
         controls=mdp.empty_control(),
         policy_carries=policy.initial_carry(),
+        state_estimator_carries=initial_se_carry,
         costs=zero_cost,
         estimated_states=estimated_states,
     )
@@ -345,13 +372,14 @@ def batch_simulate(
     steps_since_init: jax.Array,
     steps_per_init: int | None,
     last_history: History[State, Control, Cost, PolicyCarry] | None,
-    state_estimator: StateEstimator[Observation, State] | None,
+    state_estimator: StateEstimator[Observation, State, Carry] | None,
 ) -> History[State, Control, Cost, PolicyCarry]:
     """Simulate policy on MDP with batching and episode persistence."""
     if steps_per_init is not None:
-        initial_state, initial_policy_carry = init_or_persist(
+        initial_state, initial_policy_carry, initial_se_carry = init_or_persist(
             mdp=mdp,
             policy=policy,
+            state_estimator=state_estimator,
             last_history=last_history,
             steps_per_init=steps_per_init,
             steps_since_init=steps_since_init,
@@ -361,6 +389,7 @@ def batch_simulate(
     else:
         initial_state = None
         initial_policy_carry = None
+        initial_se_carry = None
 
     history = simulate(
         policy=policy,
@@ -369,6 +398,7 @@ def batch_simulate(
         n_steps=n_steps,
         initial_state=initial_state,
         initial_policy_carry=initial_policy_carry,
+        initial_state_estimator_carry=initial_se_carry,
         state_estimator=state_estimator,
     )
     return history

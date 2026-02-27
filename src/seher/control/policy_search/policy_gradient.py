@@ -16,13 +16,16 @@ from ...simulate import (
 )
 from ...types import (
     MDP,
+    POMDP,
     JaxRandomKey,
     Policy,
     Stepper,
     StepperCarry,
+    StateEstimator,
 )
 from ..tanh_gaussian_policy_mdp import (
     TanhGaussianPolicyMDP,
+    TanhGaussianPolicyPOMDP,
     compute_tanh_gaussian_policy_log_probs,
 )
 
@@ -74,7 +77,7 @@ class PolicyGradientCarry(StepperCarry[Policy]):
 
 
 @dataclass
-class PolicyGradientOptimizer[State](
+class PolicyGradientOptimizer[State, Observation](
     Stepper[PolicyGradientCarry, Policy, None, PolicyGradientAuxiliary]
 ):
     """Policy gradient optimization using REINFORCE with TanhGaussianPolicyMDP.
@@ -103,13 +106,14 @@ class PolicyGradientOptimizer[State](
 
     """
 
-    mdp: MDP[State, jax.Array, jax.Array]
+    mdp: MDP[State, jax.Array, jax.Array] | POMDP[State, Observation, jax.Array, jax.Array]
     gaussian_policy: Policy
     n_simulations: int
     n_steps: int
     optimizer: Stepper[StepperCarry, Policy, None, tuple[jax.Array, jax.Array]]
     baseline_fn: Callable | None = None
     steps_per_init: int | None = None
+    state_estimator: StateEstimator | None = None
 
     def __post_init__(self):
         """Validate steps configuration."""
@@ -125,13 +129,16 @@ class PolicyGradientOptimizer[State](
         opt_carry = self.optimizer.initial_carry(sample_parameter)
 
         if self.steps_per_init is not None:
-            # Create TanhGaussianPolicyMDP for initial history
-            augmented_mdp = TanhGaussianPolicyMDP(original_mdp=self.mdp)
+            # Create TanhGaussianPolicyMDP/POMDP for initial history
+            if hasattr(self.mdp, "emit"):
+                augmented_mdp = TanhGaussianPolicyPOMDP(original_mdp=self.mdp)
+            else:
+                augmented_mdp = TanhGaussianPolicyMDP(original_mdp=self.mdp)
             keys = jr.split(
                 jr.PRNGKey(1), self.n_simulations * self.n_steps
             ).reshape((self.n_simulations, self.n_steps, -1))
             last_history = create_empty_history(
-                augmented_mdp, self.gaussian_policy, keys
+                augmented_mdp, self.gaussian_policy, keys, self.state_estimator
             )
         else:
             last_history = None
@@ -170,8 +177,11 @@ class PolicyGradientOptimizer[State](
         """
         del problem_data
 
-        # Create the augmented MDP
-        augmented_mdp = TanhGaussianPolicyMDP(original_mdp=self.mdp)
+        # Create the augmented MDP or POMDP
+        if hasattr(self.mdp, "emit"):
+            augmented_mdp = TanhGaussianPolicyPOMDP(original_mdp=self.mdp)
+        else:
+            augmented_mdp = TanhGaussianPolicyMDP(original_mdp=self.mdp)
 
         # Update the Gaussian policy with new parameters
         updated_policy = parameter
@@ -179,17 +189,19 @@ class PolicyGradientOptimizer[State](
         @functools.partial(jax.vmap, in_axes=(None, 0, 0))
         def get_episode_data(policy, last_history, key):
             if self.steps_per_init is not None:
-                initial_state, initial_policy_carry = init_or_persist(
+                initial_state, initial_policy_carry, initial_se_carry = init_or_persist(
                     mdp=augmented_mdp,
                     policy=policy,
                     steps_since_init=carry.steps_since_init,
                     last_history=last_history,
                     steps_per_init=self.steps_per_init,
                     key=key,
+                    state_estimator=self.state_estimator,
                 )
             else:
                 initial_state = None
                 initial_policy_carry = None
+                initial_se_carry = None
 
             # Simulate with the augmented MDP
             history = simulate(
@@ -199,6 +211,8 @@ class PolicyGradientOptimizer[State](
                 n_steps=self.n_steps,
                 initial_state=initial_state,
                 initial_policy_carry=initial_policy_carry,
+                initial_state_estimator_carry=initial_se_carry,
+                state_estimator=self.state_estimator,
             )
 
             # Compute discounted returns

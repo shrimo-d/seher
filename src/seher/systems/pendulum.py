@@ -158,6 +158,11 @@ class Pendulum:
         velocity_p1 = state.velocity + self.time_diff * angle_acc
         velocity_p1 = jnp.clip(velocity_p1, -self.max_speed, self.max_speed)
         angle_p1 = state.angle + self.time_diff * velocity_p1
+        angle_p1 = (
+            (angle_p1 + jnp.pi)
+            - ((angle_p1 + jnp.pi) // (2 * jnp.pi)) * (2 * jnp.pi)
+            - jnp.pi
+        )
 
         result = PendulumState(angle=angle_p1, velocity=velocity_p1)
 
@@ -238,8 +243,33 @@ class PartiallyObservablePendulum(Pendulum):
         return PendulumState(angle=initial_angle, velocity=initial_velocity)
 
     def emit(self, state: PendulumState, control: jax.Array, key: JaxRandomKey) -> PendulumObservation:
+        key_angle, key_vel = jr.split(key)
+
         new_state = self.transit(state, control, key)
-        obs = PendulumObservation(angle=new_state.angle)
-        return obs
+        angle = new_state.angle + 0.05 * jr.normal(key_angle, ())
+
+        velocity = new_state.velocity + 0.1 * jr.normal(key_vel, ())
+        angle = (
+            (angle + jnp.pi)
+            - ((angle + jnp.pi) // (2 * jnp.pi)) * (2 * jnp.pi)
+            - jnp.pi
+        )
+
+        return PendulumState(angle=angle, velocity=velocity)
     
     emit.__doc__ = POMDP.emit.__doc__
+
+    def initial_observation(self, state: PendulumState) -> PendulumObservation:
+        
+        
+        angle = state.angle + 0.05 * jr.normal(jr.PRNGKey(1), ())
+
+        velocity = state.velocity + 0.1 * jr.normal(jr.PRNGKey(1), ())
+        angle = (
+            (angle + jnp.pi)
+            - ((angle + jnp.pi) // (2 * jnp.pi)) * (2 * jnp.pi)
+            - jnp.pi
+        )
+        new_state = PendulumState(angle=angle, velocity=velocity)
+
+        return new_state
