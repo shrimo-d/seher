@@ -3,40 +3,15 @@ import jax.numpy as jnp
 import jax.random as jr
 
 from typing import Callable
-from flax.struct import dataclass, field
+from flax.struct import dataclass
 from seher.types import MDP, State
-from seher.models.world_model import WorldModelEnsemble
 
-@dataclass
-class WorldModelMDP(MDP):
-    original_mdp: MDP
-    model: WorldModelEnsemble
-    array_to_state: Callable
-    uncertainty_weight: float = field(pytree_node=False)
-
-    @property
-    def discount(self):
-        return self.original_mdp.discount
-
-    def init(self, key):
-        return self.original_mdp.init(key)
-
-    def transit(self, state, control, key):
-        mean, _ = self.model(state, control, key)
-        return self.array_to_state(mean)
-
-    def cost(self, state, control, key):
-        base_cost = self.original_mdp.cost(state, control, key)
-        _, std = self.model(state, control, key)
-        return base_cost + self.uncertainty_weight * std.mean()
-
-    def empty_control(self):
-        return self.original_mdp.empty_control()
     
 @dataclass
 class NoiseWrapperState:
     original_state: State
     noisy_state: State
+
 
 @dataclass
 class NoiseWrapperMDP(MDP):

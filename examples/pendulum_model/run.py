@@ -10,13 +10,13 @@ from seher.types import MDP
 from seher.apx_arch import MLP
 from seher.simulate import batch_simulate
 from seher.control.solvers import ActorCriticSolver
-from seher.systems.pendulum import Pendulum, PendulumState
+from seher.systems.pendulum import Pendulum, PendulumState, render
 from seher.simulate import simulate
 from seher.types import State
 from flax.struct import dataclass, field
 from seher.jax_util import tree_stack
-from seher.mdp_util import NoiseWrapperState, NoiseWrapperMDP, WorldModelMDP
-from seher.models.world_model import WorldModelEnsemble, collect_data, train_world_model
+from seher.mdp_util import NoiseWrapperState, NoiseWrapperMDP
+from seher.models.world_model import WorldModelEnsemble, collect_data, train_world_model, WorldModelMDP
 from typing import Callable
 
 @dataclass
@@ -76,39 +76,6 @@ def pendulum_add_noise(state: PendulumState, key):
 def universal_state_to_array(state: State):
     state = getattr(state, "noisy_state", state)
     return state.cos_sin_repr()
-
-
-def render(angles, ax, **kwargs):
-    x = onp.array(angles)
-    n_steps = len(angles)
-    base = onp.zeros((n_steps, 2))
-
-    width = 10.0
-    base[:, 0] += onp.linspace(0, n_steps, n_steps)[:n_steps] / width
-
-    pendelum_len = 1
-
-    tip = base.copy()
-    tip[:, 0] += pendelum_len * onp.sin(x).reshape((-1,))
-    tip[:, 1] += pendelum_len * onp.cos(x).reshape((-1,))
-
-    lines = onp.stack([base, tip], axis=1)
-    lc = mc.LineCollection(
-        lines,
-        linewidths=2,
-        alpha=0.8,
-        **kwargs,
-    )
-    ax.add_collection(lc)
-    ax.plot(base[:, 0], base[:, 1], "k.")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    xmin = -pendelum_len
-    xmax = n_steps/width + pendelum_len
-    ymin = -pendelum_len
-    ymax = pendelum_len
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(ymin, ymax)
 
 
 def main():

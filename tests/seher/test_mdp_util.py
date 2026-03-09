@@ -6,23 +6,9 @@ from flax.struct import dataclass
 from seher.systems.pendulum import Pendulum, PendulumState
 from seher.mdp_util import NoiseWrapperState, NoiseWrapperMDP, WorldModelMDP
 from seher.models.world_model import WorldModel, WorldModelEnsemble
+from seher.models.random_policy import RandomPolicy
 
 #Helpers
-@dataclass
-class RandomPolicy:
-    mdp: object
-
-    def __call__(self, carry, obs, control, key):
-        return None, jr.uniform(
-            key,
-            shape=self.mdp.empty_control().shape,
-            minval=self.mdp.control_min,
-            maxval=self.mdp.control_max,
-        )
-
-    def initial_carry(self):
-        return None
-
 def pendulum_array_to_state(arr: jax.Array):
     angle = jnp.arctan2(arr[..., 1], arr[..., 0])
     velocity = arr[..., -1]

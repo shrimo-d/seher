@@ -1,3 +1,4 @@
+"""Module that implements world models and an MDP Wrapper for them."""
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -8,6 +9,7 @@ from typing import Callable
 from seher.apx_arch import MLP
 from seher.jax_util import tree_stack
 from seher.simulate import simulate
+from seher.types import MDP
 
 
 def collect_data(
@@ -95,6 +97,24 @@ class WorldModel:
 
 @dataclass
 class WorldModelEnsemble:
+    """An ensemble of world models.
+    
+    Attributes
+    ----------
+    models:
+        tree stacked world models.
+    state_to_array:
+        Turn the state the world model gets into an array.
+    control_to_array:
+        Turn the control the world model gets into an array.
+    n_models:
+        Number of models in the ensemble.
+    state_dim:
+        Dimension of the state array.
+    control_dim:
+        Dimension of the control dim.
+    
+    """
     models: WorldModel
     state_to_array: Callable
     control_to_array: Callable
@@ -158,9 +178,50 @@ class WorldModelEnsemble:
 
         preds = jax.vmap(forward_single, in_axes=(0, 0))(self.models, keys)
 
-        #mean = preds.mean(axis=0)
         std = (preds - state).std(axis=0)
-        #std = preds.std(axis=0)
         model_num = jr.randint(key, shape=(1,), minval=0, maxval=self.n_models)
 
         return preds[model_num[0]], std
+
+
+@dataclass
+class WorldModelMDP(MDP):
+    """An MDP-Wrapper for use of the world model states.
+    
+    Attributes
+    ----------
+    original_mdp:
+        MDP to wrap.
+    model:
+        World model or World model ensemble.
+    array_to_state:
+        Turn the array the world model outputs into a State of
+        the original MDP.
+    uncertainty_weight:
+        Weight of the uncertainty penalty of the state estimate added
+        to the cost of original MDP.
+    
+    """
+    original_mdp: MDP
+    model: WorldModelEnsemble
+    array_to_state: Callable
+    uncertainty_weight: float = field(pytree_node=False)
+
+    @property
+    def discount(self):
+        return self.original_mdp.discount
+
+    def init(self, key):
+        return self.original_mdp.init(key)
+
+    def transit(self, state, control, key):
+        mean, _ = self.model(state, control, key)
+        return self.array_to_state(mean)
+
+    def cost(self, state, control, key):
+        base_cost = self.original_mdp.cost(state, control, key)
+        _, std = self.model(state, control, key)
+        return base_cost + self.uncertainty_weight * std.mean()
+
+    def empty_control(self):
+        return self.original_mdp.empty_control()

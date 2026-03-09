@@ -473,8 +473,8 @@ class ActorCriticSolver(BaseSolver[MDP]):
             actor = self.actor
             critic = self.critic
 
-        if not isinstance(actor, StaticMLPPolicy):
-            raise ValueError("actor needs to be of type StaticMLPPolicy")
+        #if not isinstance(actor, StaticMLPPolicy):
+        #    raise ValueError("actor needs to be of type StaticMLPPolicy")
         if not isinstance(critic, StaticMLPCritic):
             raise ValueError("actor needs to be of type StaticMLPCritic")
 

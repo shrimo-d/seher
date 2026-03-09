@@ -3,9 +3,58 @@
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import numpy as onp
+import matplotlib.pyplot as plt
+import matplotlib.collections as mc
 from flax.struct import dataclass
 
 from ..types import MDP, JaxRandomKey
+
+
+def render(angles, ax, **kwargs):
+    """Interprets an array of angles (radian) as a pendulum trajectory
+    and plots it onto given axis.
+    
+    Parameters
+    ----------
+    angles:
+        Array with (N, 1) angles in radian.
+    ax:
+        Matplotlib axis to plot onto.
+    kwargs:
+        Keyword arguments for the lines.
+    
+    """
+    x = onp.array(angles)
+    n_steps = len(angles)
+    base = onp.zeros((n_steps, 2))
+
+    width = 10.0
+    base[:, 0] += onp.linspace(0, n_steps, n_steps)[:n_steps] / width
+
+    pendelum_len = 1
+
+    tip = base.copy()
+    tip[:, 0] += pendelum_len * onp.sin(x).reshape((-1,))
+    tip[:, 1] += pendelum_len * onp.cos(x).reshape((-1,))
+
+    lines = onp.stack([base, tip], axis=1)
+    lc = mc.LineCollection(
+        lines,
+        linewidths=2,
+        alpha=0.8,
+        **kwargs,
+    )
+    ax.add_collection(lc)
+    ax.plot(base[:, 0], base[:, 1], "k.")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    xmin = -pendelum_len
+    xmax = n_steps/width + pendelum_len
+    ymin = -(pendelum_len + 0.1)
+    ymax = pendelum_len + 0.1
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
 
 
 @dataclass
