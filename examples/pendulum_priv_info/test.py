@@ -10,7 +10,7 @@ from seher.systems.pendulum import render
 from seher.control.solvers import ActorCriticSolver
 from seher.simulate import simulate, batch_simulate
 from seher.models.world_model import collect_data
-from state_estimator import (
+from seher.models.state_estimator import (
     StateEstimatorMLP,
     StateEstimatorGRUGaussian,
     StateEstimatorMLPGaussian,
