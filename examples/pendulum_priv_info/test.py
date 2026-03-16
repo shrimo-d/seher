@@ -1,3 +1,5 @@
+"""Even after many modifications on the loss function this version will only learn the
+EV of the mass distribution."""
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -72,7 +74,7 @@ def se_forward_sequence(se, obs_seq, act_seq, key):
     _, preds = jax.lax.scan(step, (carry0, key), (obs_seq, act_seq))
     return preds
 
-def make_se_trainer(se, lr=1e-3, sample_mse_weight=0.0, burn_in=0):
+def make_se_trainer(se, lr=1e-3, sample_mse_weight=0.0, burn_in=0, mass_weight=10.0):
     opt = optax.adam(lr)
     opt_state = opt.init(se)
 
@@ -99,9 +101,31 @@ def make_se_trainer(se, lr=1e-3, sample_mse_weight=0.0, burn_in=0):
             scale_ls = scale
 
         is_stoch = jnp.any(scale_ls > 0.0)
+        #Mass penalty to prevent learning EV with high std to cover everything
+        mass_true = true_reward_ready[..., -1]
+        mass_pred = loc_reward_ready[..., -1]
+        mass_scale = jnp.clip(scale_ls[..., -1], 1e-4)
 
-        mse = jnp.mean((loc_reward_ready - true_reward_ready) ** 2)
-        nll = jnp.mean(gaussian_nll(true_reward_ready, loc_reward_ready, jnp.clip(scale_ls, 1e-4)))
+        T = mass_true.shape[1]
+        t = jnp.arange(T)
+        mass_smooth_weight = 1.0
+        mass_scale_weight = 20.0
+        mass_start = 10
+
+
+        mass_smooth_penalty = jnp.mean((mass_pred[:, 1:] - mass_pred[:, :-1])**2)
+        mass_scale_penalty = jnp.mean(jnp.maximum(mass_scale - 0.15, 0.0) **2)
+
+        mass_pred_traj = jnp.mean(mass_pred[:, mass_start:], axis=1)
+        mass_true_traj = jnp.mean(mass_true[:, mass_start:], axis=1)
+        mass_traj_mse = jnp.mean((mass_pred_traj - mass_true_traj)**2)
+
+        state_true = true_reward_ready[..., :-1]
+        state_pred = loc_reward_ready[..., :-1]
+        state_scale = jnp.clip(scale_ls[..., :-1], 1e-4)
+
+        state_mse = jnp.mean((state_pred - state_true) ** 2)
+        state_nll = jnp.mean((gaussian_nll(state_true, state_pred, state_scale)))
 
         if sample_mse_weight > 0.0:
             key, k_samp = jr.split(key, 2)
@@ -113,8 +137,18 @@ def make_se_trainer(se, lr=1e-3, sample_mse_weight=0.0, burn_in=0):
         
         loss = jax.lax.cond(
             is_stoch,
-            lambda _: nll + sample_mse_weight * sample_mse,
-            lambda _: mse,
+            lambda _: (
+                state_nll
+                + mass_weight * mass_traj_mse
+                + mass_smooth_weight * mass_smooth_penalty
+                + mass_scale_weight * mass_scale_penalty
+                + sample_mse_weight * sample_mse
+            ),
+            lambda _: (
+                state_mse
+                + mass_weight * mass_traj_mse
+                + mass_smooth_weight * mass_smooth_penalty
+            ),
             operand=None
         )
         return loss
@@ -131,8 +165,8 @@ def make_se_trainer(se, lr=1e-3, sample_mse_weight=0.0, burn_in=0):
 def tree_take(pytree, idx):
     return jax.tree_util.tree_map(lambda x: x[idx], pytree)
 
-def train_se(se, obs, act, true, steps=2000, batch_size=32, key=jr.PRNGKey(0), burn_in=0, sample_mse_weight=0.0, lr=1e-3):
-    step_fn, opt_state = make_se_trainer(se, lr=lr, sample_mse_weight=sample_mse_weight, burn_in=burn_in)
+def train_se(se, obs, act, true, steps=2000, batch_size=32, key=jr.PRNGKey(0), burn_in=0, sample_mse_weight=0.0, lr=1e-3, mass_weight=10.0):
+    step_fn, opt_state = make_se_trainer(se, lr=lr, sample_mse_weight=sample_mse_weight, burn_in=burn_in, mass_weight=mass_weight)
 
     N = true.shape[0]
     for i in range(steps):
@@ -178,14 +212,31 @@ sem = StateEstimatorMLP(
     obs_dim=3,
     control_dim=1,
 )
+#Create MLP stochastic SE
+sems_mlp = MLP.make(
+    inpt_size=20,
+    layer_sizes=[32,32],
+    output_size=8,
+    activations=[jax.nn.tanh, jax.nn.tanh, lambda x: x],
+    key=jr.PRNGKey(69),
+)
+sems = StateEstimatorMLPGaussian(
+    mlp=sems_mlp,
+    obs_to_array=lambda state: state.obs.cos_sin_repr(),
+    control_to_array=lambda x: x,
+    window_size=5,
+    obs_dim=3,
+    control_dim=1,
+    state_dim=4,
+)
 #Create GRU stochastic SE
 seg_gru = GRUCell.make(
     in_dim=4,
-    hidden_dim=64,
+    hidden_dim=32,
     key=jr.PRNGKey(42)
 )
 seg_mlp = MLP.make(
-    inpt_size=64,
+    inpt_size=32,
     layer_sizes=[32,32],
     output_size=8,
     activations=[jax.nn.tanh, jax.nn.tanh, lambda x: x],
@@ -196,23 +247,34 @@ seg = StateEstimatorGRUGaussian(
     head=seg_mlp,
     obs_to_array=lambda state: state.obs.cos_sin_repr(),
     control_to_array=lambda x: x,
-    hidden_dim=64,
+    hidden_dim=32,
     state_dim=4,
 )
 
-his = collect_se_dataset(mdp, rp, 4000, 100, jr.PRNGKey(2))
+#Collect data
+his = collect_se_dataset(mdp, rp, 8200, 500, jr.PRNGKey(2))
 obs,acts, trues = extract_arrays(his, lambda state: state.true.cos_sin_repr())
-sem = train_se(sem, obs, acts, trues, burn_in=4, steps=4000)
-seg = train_se(seg, obs, acts, trues, sample_mse_weight=0.5, steps=4000)
+#Train
+sem = train_se(sem, obs, acts, trues, burn_in=4, steps=8000)
+sems = train_se(sems, obs, acts, trues, burn_in=4, steps=8000)
+seg = train_se(seg, obs, acts, trues, steps=8000)
 
 frozen_sem = jax.lax.stop_gradient(sem)
+frozen_sems =jax.lax.stop_gradient(sems)
 frozen_seg = jax.lax.stop_gradient(seg)
 
+#Build MDPs
 sem_mdp = StateEstimatorMDP(
     original_mdp=mdp,
     estimator=sem,
     latent_dim=4,
     adapter=MeanLatent(latent_dim=4),
+)
+sems_mdp = StateEstimatorMDP(
+    original_mdp=mdp,
+    estimator=sems,
+    latent_dim=4,
+    adapter=SampleLatent(latent_dim=4),
 )
 seg_mdp = StateEstimatorMDP(
     original_mdp=mdp,
@@ -220,86 +282,151 @@ seg_mdp = StateEstimatorMDP(
     latent_dim=4,
     adapter=SampleLatent(latent_dim=4)
 )
-
+#Build Solvers
 solver_sem = ActorCriticSolver(
-    episode_length=500,
+    episode_length=100,
     steps_per_update=25,
     n_simulations=16,
     max_updates=4000,
     obs_to_array=lambda state: state.latent,
     state_to_array=lambda state: state.latent,
 )
-
+solver_sems = ActorCriticSolver(
+    episode_length=100,
+    steps_per_update=25,
+    n_simulations=16,
+    max_updates=4000,
+    obs_to_array=lambda state: state.latent,
+    state_to_array=lambda state: state.latent,
+)
 solver_seg = ActorCriticSolver(
-    episode_length=500,
+    episode_length=100,
     steps_per_update=25,
     n_simulations=16,
     max_updates=4000,
     obs_to_array=lambda state: state.latent,
     state_to_array=lambda state: state.latent,
 )
-
+#Include an "Oracle" that has full information
 solver_oracle = ActorCriticSolver(
-    episode_length=500,
+    episode_length=100,
     steps_per_update=25,
     n_simulations=16,
     max_updates=4000,
     obs_to_array=lambda state: state.true.cos_sin_repr(),
     state_to_array=lambda state: state.true.cos_sin_repr(),
 )
+
 solver_oracle.solve(mdp, jr.PRNGKey(5))
 solver_sem.solve(sem_mdp, jr.PRNGKey(6))
-solver_seg.solve(seg_mdp, jr.PRNGKey(7))
+solver_sems.solve(sems_mdp, jr.PRNGKey(7))
+solver_seg.solve(seg_mdp, jr.PRNGKey(8))
 
 policy_sem = solver_sem.policy
+policy_sems = solver_sems.policy
 policy_seg = solver_seg.policy
 policy_oracle = solver_oracle.policy
 
-print("StateEstimatorMLP:", evaluate(policy_sem, sem_mdp, jr.PRNGKey(10)))
+print("StateEstimatorMLP (det):", evaluate(policy_sem, sem_mdp, jr.PRNGKey(10)))
+print("StateEstimatorMLPGaussian:", evaluate(policy_sems, sems_mdp, jr.PRNGKey(10)))
 print("StateEstimatorGRU:", evaluate(policy_seg, seg_mdp, jr.PRNGKey(10)))
 print("Oracle MDP:", evaluate(policy_oracle, mdp, jr.PRNGKey(10)))
+#Plot trajectories!
+pol_dic = {"Oracle-Policy": (policy_oracle, lambda state: state.true.cos_sin_repr(), mdp),
+           "Deterministic-MLP-Estimator": (policy_sem, lambda state: state.obs.true.cos_sin_repr(), sem_mdp),
+           "Stochastic-MLP-Estimator": (policy_sems, lambda state: state.obs.true.cos_sin_repr(), sems_mdp),
+           "Stochastic-GRU-Estimator": (policy_seg, lambda state: state.obs.true.cos_sin_repr(), seg_mdp),
+}
+for name, (pol,st2ar, dp) in pol_dic.items():
+    fig, ax = plt.subplots(8, figsize=(12, 16))
+    for traj in range(8):
+        states, _, _ = collect_data(
+            dp,
+            pol,
+            1,
+            100,
+            st2ar,
+            control_to_array=lambda x: x,
+            key=jr.PRNGKey(traj),
+        )
+        ang = jnp.arctan2(states[..., 1], states[..., 0])
+        render(ang, ax[traj])
+        ax[traj].text(-0.08, 0.5, f"Mass {states[0, 4]}", transform=ax[traj].transAxes, va="center", ha="right")
+    fig.suptitle(name)
+    plt.tight_layout()
+    fig.savefig(f"{name}_trajectories.png")
+#Plot Mass estimation!
+est_dic = {
+    "Deterministic-MLP-Estimator": (policy_sem, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., -1], state.est.loc[..., -1], state.est.scale[..., -1]), axis=0), sem_mdp),
+    "Stochastic-MLP-Estimator": (policy_sems, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., -1], state.est.loc[..., -1], state.est.scale[..., -1]), axis=0), sems_mdp),
+    "Stochastic-GRU-Estimator": (policy_seg, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., -1], state.est.loc[..., -1], state.est.scale[..., -1]), axis=0), seg_mdp),
+}
+for name, (pol, st2ar, dp) in est_dic.items():
+    fig, ax = plt.subplots(8, figsize=(12,16))
+    for traj in range(8):
+        states, _, _ = collect_data(
+            dp,
+            pol,
+            1,
+            100,
+            st2ar,
+            control_to_array=lambda x: x,
+            key=jr.PRNGKey(traj),
+        )
+        ax[traj].plot(range(len(states)), states[:,0], label="True mass")
+        ax[traj].plot(range(len(states)), states[:,1], label="Mean est. mass", color="orange")
+        ax[traj].fill_between(range(len(states)), states[:,1]-states[:,2], states[:,1]+states[:,2], alpha=0.3, color="orange")
+        ax[traj].legend()
+    fig.suptitle(name)
+    plt.tight_layout()
+    fig.savefig(f"{name}_mass_estimation.png")
 
-oracle_states, _, _ = collect_data(
-    mdp,
-    policy_oracle,
-    1,
-    500,
-    lambda state: state.true.cos_sin_repr(),
-    control_to_array=lambda x: x,
-    key=jr.PRNGKey(0),
-)
-estm_states, _, _ = collect_data(
-    sem_mdp,
-    policy_sem,
-    1,
-    500,
-    lambda state: state.obs.true.cos_sin_repr(),
-    lambda x: x,
-    key=jr.PRNGKey(0),
-)
-estg_states, _, _ = collect_data(
-    seg_mdp,
-    policy_seg,
-    1,
-    500,
-    lambda state: state.obs.true.cos_sin_repr(),
-    lambda x: x,
-    key=jr.PRNGKey(0),
-)
+est_dic = {
+    "Deterministic-MLP-Estimator": (policy_sem, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., 0], state.est.loc[..., 0], state.est.scale[..., 0]), axis=0), sem_mdp),
+    "Stochastic-MLP-Estimator": (policy_sems, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., 0], state.est.loc[..., 0], state.est.scale[..., 0]), axis=0), sems_mdp),
+    "Stochastic-GRU-Estimator": (policy_seg, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., 0], state.est.loc[..., 0], state.est.scale[..., 0]), axis=0), seg_mdp),
+}
+for name, (pol, st2ar, dp) in est_dic.items():
+    fig, ax = plt.subplots(8, figsize=(12,16))
+    for traj in range(8):
+        states, _, _ = collect_data(
+            dp,
+            pol,
+            1,
+            100,
+            st2ar,
+            control_to_array=lambda x: x,
+            key=jr.PRNGKey(traj),
+        )
+        ax[traj].plot(range(len(states)), states[:,0], label="True cos angle")
+        ax[traj].plot(range(len(states)), states[:,1], label="Mean est. cos angle", color="orange")
+        ax[traj].fill_between(range(len(states)), states[:,1]-states[:,2], states[:,1]+states[:,2], alpha=0.3, color="orange")
+        ax[traj].legend()
+    fig.suptitle(name)
+    plt.tight_layout()
+    fig.savefig(f"{name}_angle_estimation.png")
 
-trajs = jnp.stack([
-    jnp.arctan2(estm_states[..., 1], estm_states[..., 0]),
-    jnp.arctan2(estg_states[..., 1], estg_states[..., 0]),
-    jnp.arctan2(oracle_states[..., 1], oracle_states[..., 0]),
-], axis=0)
-
-fig, ax = plt.subplots(3)
-render(trajs[0], ax[0])
-render(trajs[1], ax[1])
-render(trajs[2], ax[2])
-ax[0].set_title("StateEstimatorMLP Trajectory")
-ax[1].set_title("StateEstimatorGRU Trajectory")
-ax[2].set_title("Oracle Trajectory")
-plt.tight_layout()
-fig.savefig("se_with_gru_trajectories.png")
-plt.show()
+est_dic = {
+    "Deterministic-MLP-Estimator": (policy_sem, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., 2], state.est.loc[..., 2], state.est.scale[..., 2]), axis=0), sem_mdp),
+    "Stochastic-MLP-Estimator": (policy_sems, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., 2], state.est.loc[..., 2], state.est.scale[..., 2]), axis=0), sems_mdp),
+    "Stochastic-GRU-Estimator": (policy_seg, lambda state: jnp.stack((state.obs.true.cos_sin_repr()[..., 2], state.est.loc[..., 2], state.est.scale[..., 2]), axis=0), seg_mdp),
+}
+for name, (pol, st2ar, dp) in est_dic.items():
+    fig, ax = plt.subplots(8, figsize=(12,16))
+    for traj in range(8):
+        states, _, _ = collect_data(
+            dp,
+            pol,
+            1,
+            100,
+            st2ar,
+            control_to_array=lambda x: x,
+            key=jr.PRNGKey(traj),
+        )
+        ax[traj].plot(range(len(states)), states[:,0], label="True velocity")
+        ax[traj].plot(range(len(states)), states[:,1], label="Mean est. velocity", color="orange")
+        ax[traj].fill_between(range(len(states)), states[:,1]-states[:,2], states[:,1]+states[:,2], alpha=0.3, color="orange")
+        ax[traj].legend()
+    fig.suptitle(name)
+    plt.tight_layout()
+    fig.savefig(f"{name}_velocity_estimation.png")

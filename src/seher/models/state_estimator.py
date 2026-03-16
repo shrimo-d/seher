@@ -9,10 +9,22 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 
-from typing import Callable
+from typing import Callable, Any
 from flax.struct import dataclass, field
 from seher.apx_arch import MLP, GRUCell
 from seher.types import MDP, StateEstimator, LatentAdapter, StateEstimatorCarry, Observation, State
+from seher.jax_util import tree_stack
+
+
+def softplus_inv(y: jax.Array, eps: float = 1e-8) -> jax.Array:
+    """Inverse softplus, numerically stabilized."""
+    y = jnp.maximum(y, eps)
+    return jnp.log(jnp.expm1(y))
+
+
+def scale_from_inv_sps(inv_sps: jax.Array, min_scale: float = 1e-8) -> jax.Array:
+    """Compute scale from inverse softplus scale."""
+    return jnp.clip(jax.nn.softplus(inv_sps), a_min=min_scale)
 
 
 @dataclass
@@ -130,7 +142,7 @@ class StateEstimatorMLPGaussian:
     Attributes
     ----------
     mlp:
-        Function approximator to use.
+        Function approximator to use. Output should be 2 times state_dim.
     obs_to_array:
         Turn the observation that a state estimator gets into an array so that it can be
         given to an MLP.
@@ -242,7 +254,98 @@ class StateEstimatorGRUGaussian:
         return carry.replace(h=h_new), est
 
     __call__.__doc__ = StateEstimator.__call__.__doc__
+
+
+@dataclass
+class EnsembleStateEstimate:
+    """Aggregated output of a state estimator ensemble."""
+    loc: jax.Array
+    inv_sps: jax.Array
+    epistemic_std: jax.Array
+    aleatoric_std: jax.Array
+    member_locs: jax.Array
+    member_inv_sps: jax.Array
+
+    @property
+    def scale(self) -> jax.Array:
+        return scale_from_inv_sps(self.inv_sps)
+
+
+@dataclass
+class StateEstimatorEnsemble:
+    """Generic ensemble for state estimators with same interface."""
+    estimators: any
+    initial_carry_template: any
+    n_members: int = field(pytree_node=False)
+
+    @classmethod
+    def create(
+        cls,
+        n_members: int,
+        key,
+        build_member: Callable,
+    ):
+        """Creates a state estimator ensemble.
+        
+        Parameters
+        ----------
+        n_members:
+            Number of estimators in the ensemble.
+        key:
+            JaxRandomKey for downstream stochasticity.
+        build_member:
+            Callable that takes a key and returns an estimator object.
+        
+        """
+        keys = jr.split(key, n_members)
+
+        members = [build_member(k) for k in keys]
+        carries = [m.initial_carry() for m in members]
+
+        return cls(
+            estimators=tree_stack(members),
+            initial_carry_template=tree_stack(carries),
+            n_members=n_members
+        )
     
+    def initial_carry(self):
+        return self.initial_carry_template
+    
+    def __call__(self, carry, obs, control, key):
+        keys = jr.split(key, self.n_members)
+
+        def forward_single(estimator, est_carry, k):
+            return estimator(est_carry, obs, control, k)
+        
+        new_carries, member_estimates = jax.vmap(
+            forward_single,
+            in_axes=(0,0,0),
+        )(self.estimators, carry, keys)
+
+        member_locs = member_estimates.loc
+        member_inv_sps = member_estimates.inv_softplus_scale
+        member_scales = scale_from_inv_sps(member_inv_sps)
+
+        mean_loc = member_locs.mean(axis=0)
+        epistemic_var = member_locs.var(axis=0)
+        epistemic_std = jnp.sqrt(epistemic_var)
+
+        aleatoric_var = jnp.mean(member_scales**2, axis=0)
+        aleatoric_std = jnp.sqrt(aleatoric_var)
+
+        total_std = jnp.sqrt(epistemic_var + aleatoric_var)
+        total_inv_sps = softplus_inv(total_std)
+
+        estimate = EnsembleStateEstimate(
+            loc=mean_loc,
+            inv_sps=total_inv_sps,
+            epistemic_std=epistemic_std,
+            aleatoric_std=aleatoric_std,
+            member_locs=member_locs,
+            member_inv_sps=member_inv_sps,
+        )
+        return new_carries, estimate
+
 
 @dataclass
 class MeanLatent:
@@ -285,7 +388,7 @@ class SampleLatent:
         scale = jnp.clip(est.scale, self.min_scale)
         eps = jr.normal(key, shape=loc.shape)
         z = loc + scale * eps
-        return jnp.asarray(z).reshape((self.latent_dim))
+        return jnp.asarray(z).reshape((self.latent_dim,))
     
     __call__.__doc__ = LatentAdapter.__call__.__doc__
 
@@ -311,7 +414,76 @@ class FeatureLatent:
         loc = jnp.asarray(est.loc)
         scale = jnp.clip(est.scale, self.min_scale)
         z = jnp.concatenate([loc, scale], axis=-1)
-        return jnp.asarray(z).reshape((self.latent_dim))
+        return jnp.asarray(z).reshape((self.latent_dim,))
+    
+    __call__.__doc__ = LatentAdapter.__call__.__doc__
+
+
+@dataclass
+class MeanEnsembleLatent:
+    """Latent adapter for ensembles that uses the mean as latent state.
+    
+    Attributes
+    ----------
+    latent_dim:
+        Dimension of the latent state.
+    
+    """
+    latent_dim: int = field(pytree_node=False)
+
+    def __call__(self, est, key):
+        del key
+        return jnp.asarray(est.loc).reshape((self.latent_dim,))
+
+
+@dataclass
+class FeatureEnsembleLatent:
+    """Latent adapter for ensembles that uses mean + uncertainty
+    as features.
+    
+    """
+    latent_dim: int = field(pytree_node=False)
+
+    def __call__(self, est, key):
+        del key
+        z = jnp.concatenate(
+            [est.loc, est.epistemic_std, est.aleatoric_std],
+            axis=-1,
+        )
+        return jnp.asarray(z).reshape((self.latent_dim,))
+
+    __call__.__doc__ = LatentAdapter.__call__.__doc__
+
+
+@dataclass
+class ThompsonEnsembleLatent:
+    """Latent adapter for ensembles which samples loc from one member.
+    
+    """
+    latent_dim: int = field(pytree_node=False)
+
+    def __call__(self, est, key):
+        n_members = est.member_locs.shape[0]
+        idx = jr.randint(key, shape=(), minval=0, maxval=n_members)
+        z = est.member_locs[idx]
+        return jnp.asarray(z).reshape((self.latent_dim,))
+    
+    __call__.__doc__ = LatentAdapter.__call__.__doc__
+    
+
+@dataclass
+class SampleMeanGaussianLatent:
+    """Latent adapter that samples from the aggregated ensemble Gaussian.
+    
+    """
+    latent_dim: int = field(pytree_node=False)
+    min_scale: float = field(pytree_node=False)
+
+    def __call__(self, est, key):
+        scale = jnp.clip(jax.nn.softplus(est.scale), a_min=self.min_scale)
+        eps = jr.normal(key, shape=est.loc.shape)
+        z = est.loc + scale * eps
+        return jnp.asarray(z).reshape((self.latent_dim,))
     
     __call__.__doc__ = LatentAdapter.__call__.__doc__
 
@@ -341,9 +513,6 @@ class StateEstimatorMDPState:
 @dataclass
 class StateEstimatorMDP:
     """Wrapper-MDP for when you want to use a state estimator.
-    
-    The State Estimator should return a StateEstimate object in order to
-    work correctly!
 
     Attributes
     ----------
@@ -355,16 +524,18 @@ class StateEstimatorMDP:
         LatentAdapter to turn state estimator output into latent representation.
     latent_dim:
         Dimension of latent representation.
-    estimator_std_penalty_weight:
-        Weight of the penalty for the mean std output of the state estimator added
-        to the cost of original mdp.
+    penalty_fn:
+        Callable that computes a penalty term for the cost.
     
     """
     original_mdp: MDP
     estimator: StateEstimator
     adapter: LatentAdapter
     latent_dim: int = field(pytree_node=False)
-    estimator_std_penalty_weight: float = field(pytree_node=False, default=0.0)
+    penalty_fn: Callable[[Any], jax.Array] = field(
+        pytree_node=False,
+        default=lambda est: jnp.array(0.0),
+    )
 
     @property
     def discount(self):
@@ -382,9 +553,8 @@ class StateEstimatorMDP:
         return self.original_mdp.empty_control()
     
     def cost(self, state, control, key):
-        mean_std = jnp.mean(state.est.scale)
-        std_penalty = self.estimator_std_penalty_weight * mean_std
-        return self.original_mdp.cost(state.obs, control, key) + std_penalty
+        penalty = self.penalty_fn(state)
+        return self.original_mdp.cost(state.obs, control, key) + penalty
     
     def init(self, key):
         obs0 = self.original_mdp.init(key)

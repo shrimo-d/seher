@@ -139,7 +139,7 @@ class GRUCell:
         hidden_dim: int,
         key: jax.Array,
         w_init: Initializer = lambda key, shape: jr.uniform(
-            key=key, shape=shape
+            key=key, shape=shape, minval=-0.1, maxval=0.1
         ),
         b_init: Initializer = lambda key, shape: jr.uniform(
             key=key, shape=shape
