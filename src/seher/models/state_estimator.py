@@ -531,7 +531,6 @@ class StateEstimatorMDP:
     original_mdp: MDP
     estimator: StateEstimator
     adapter: LatentAdapter
-    latent_dim: int = field(pytree_node=False)
     penalty_fn: Callable[[Any], jax.Array] = field(
         pytree_node=False,
         default=lambda est: jnp.array(0.0),

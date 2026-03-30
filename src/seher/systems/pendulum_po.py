@@ -58,6 +58,8 @@ class PartiallyObservablePendulum:
     time_diff: float = 0.05
     max_torque: float = 2.0
     max_speed: float = 8.0
+    max_mass: float = 4.0
+    min_mass: float = 0.5
 
     @property
     def control_min(self) -> jax.Array:
@@ -74,10 +76,10 @@ class PartiallyObservablePendulum:
             angle_key, minval=-jnp.pi, maxval=jnp.pi, shape=(1,)
         )
         initial_velocity = jr.uniform(
-            velocity_key, minval=-8, maxval=8, shape=(1,)
+            velocity_key, minval=-self.max_speed, maxval=self.max_speed, shape=(1,)
         )
         mass = jr.uniform(
-            mass_key, minval=0.5, maxval=4, shape=(1,)
+            mass_key, minval=self.min_mass, maxval=self.max_mass, shape=(1,)
         )
         initial_true = POPendulumTrueState(
             angle=initial_angle, velocity=initial_velocity, mass=mass

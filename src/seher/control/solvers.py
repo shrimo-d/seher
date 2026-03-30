@@ -11,6 +11,7 @@ import jax.random as jr
 import optax
 
 from seher.apx_arch import MLP, StaticMLPCritic, StaticMLPPolicy
+from seher.apx_util import static_policy_scaled_soft_sign, static_critic_scaled_soft_sign
 from seher.control.policy_search import (
     MCPS,
     ActorCritic,
@@ -53,7 +54,7 @@ def _create_mlp_policy(
     """Create a StaticMLPPolicy with MLP architecture."""
     defaults = {
         "layer_sizes": [32],
-        "activations": [jnn.soft_sign, lambda x: jnn.soft_sign(x) * 4 - 2],
+        "activations": [jnn.soft_sign, static_policy_scaled_soft_sign],
     }
     defaults.update(mlp_kws)
 
@@ -72,7 +73,7 @@ def _create_mlp_critic(
     """Create a StaticMLPCritic with MLP architecture."""
     defaults = {
         "layer_sizes": [32],
-        "activations": [jnn.soft_sign, lambda x: 20 * jnn.soft_sign(x) - 10],
+        "activations": [jnn.soft_sign, static_critic_scaled_soft_sign],
     }
     defaults.update(mlp_kws)
 
