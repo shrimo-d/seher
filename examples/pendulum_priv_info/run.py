@@ -58,6 +58,7 @@ from seher.models.state_estimator import (
     StateEstimatorMDP,
     StateEstimatorMLP,
     StateEstimatorMLPGaussian,
+    scale_from_inv_sps,
 )
 from seher.models.world_model import collect_data
 from seher.simulate import batch_simulate, simulate
@@ -617,7 +618,6 @@ def make_se_trainer(
 
     return step, opt_state
 
-
 def train_se(
     se,
     obs,
@@ -780,6 +780,163 @@ ESTIMATOR_BUILDERS: dict[str, Callable[[jax.Array, ArchitectureConfig], Any]] = 
 # -----------------------------------------------------------------------------
 
 
+def _member_outputs_to_loc_scale(outs: Any, burn_in: int, min_scale=1e-8) -> tuple[jax.Array, jax.Array]:
+    member_locs = outs.member_locs[:, burn_in:]
+    member_inv_sps = outs.member_inv_sps[:, burn_in:]
+
+    is_det = jnp.any(member_inv_sps < -25.0)
+
+    member_scales = jax.lax.cond(
+        is_det,
+        lambda _: jnp.zeros_like(member_locs),
+        lambda _: jnp.clip(scale_from_inv_sps(member_inv_sps), a_min=min_scale),
+        operand=None,
+    )
+    return member_locs, member_scales
+
+
+def make_se_ensemble_trainer(
+        ensemble,
+        lr: float = 1e-3,
+        sample_mse_weight: float = 0.0,
+        burn_in: int = 0,
+        mass_weight: float = 10.0,
+):
+    opt = optax.adam(lr)
+    opt_state = opt.init(ensemble)
+
+    def loss_fn(ensemble_params, obs, act, true, key):
+        bsz = true.shape[0]
+        keys = jr.split(key, bsz)
+
+        outs = jax.vmap(
+            lambda oseq, aseq, k: se_forward_sequence(ensemble_params, oseq, aseq, k),
+            in_axes=(0, 0, 0),
+        )(obs, act, keys)
+
+        member_locs, member_scales = _member_outputs_to_loc_scale(outs, burn_in=burn_in)
+        true_trim = true[:, burn_in:]
+
+        true_reward_ready = to_angle_augmented(true_trim)
+        member_pred_ready = jax.vmap(
+            jax.vmap(
+                jax.vmap(to_angle_augmented, in_axes=0),
+                in_axes=0,
+            ),
+            in_axes=0,
+        )(member_locs)
+
+        if member_scales.shape[-1] == member_locs.shape[-1]:
+            ang_scale = jnp.mean(member_scales[..., 0:2], axis=-1, keepdims=True)
+            rest_scale = member_scales[..., 2:]
+            member_scales_ls = jnp.concatenate([ang_scale, rest_scale], axis=-1)
+        else:
+            member_scales_ls = member_scales
+        
+        is_stoch = jnp.any(member_scales_ls > 0.0)
+
+        true_exp = true_reward_ready[:, :, None, :]
+        mass_true = true_exp[..., -1]
+        mass_pred = member_pred_ready[..., -1]
+        mass_scale = jnp.clip(member_scales_ls[..., -1], 1e-4)
+
+        mass_smooth_weight = 1.0
+        mass_scale_weight = 20.0
+        mass_start = 10
+
+        mass_smooth_penalty = jnp.mean((mass_pred[:, 1:] - mass_pred[:, :-1])**2)
+        mass_scale_penalty = jnp.mean(jnp.maximum(mass_scale - 0.15, 0.0) ** 2)
+
+        mass_pred_traj = jnp.mean(mass_pred[:, mass_start:], axis=1)
+        mass_true_traj = jnp.mean(mass_true[:, mass_start:], axis=1)
+        mass_traj_mse = jnp.mean((mass_pred_traj - mass_true_traj) ** 2)
+
+        state_true = true_exp[..., :1]
+        state_pred = member_pred_ready[..., :-1]
+        state_scale = jnp.clip(member_scales_ls[..., :-1], 1e-4)
+
+        state_mse = jnp.mean((state_pred - state_true) ** 2)
+        state_nll = jnp.mean(gaussian_nll(state_true, state_pred, state_scale))
+
+        if sample_mse_weight > 0.0:
+            key, k_samp = jr.split(key, 2)
+            eps = jr.normal(k_samp, shape=member_pred_ready.shape)
+            y_samp = member_pred_ready + jnp.clip(member_scales_ls, 1e-4) * eps
+            sample_mse = jnp.mean((y_samp - true_exp)**2)
+        else:
+            sample_mse = 0.0
+        
+        loss = jax.lax.cond(
+            is_stoch,
+            lambda _: (
+                state_nll
+                + mass_weight * mass_traj_mse
+                + mass_smooth_weight * mass_smooth_penalty
+                + mass_scale_weight * mass_scale_penalty
+                + sample_mse_weight * sample_mse
+            ),
+            lambda _: (
+                state_mse
+                + mass_weight * mass_traj_mse
+                + mass_smooth_weight * mass_smooth_penalty
+            ),
+            operand=None,
+        )
+        return loss
+    
+    @jax.jit
+    def step(ensemble_params, opt_state, obs, act, true, key):
+        loss, grads = jax.value_and_grad(loss_fn)(ensemble_params, obs, act, true, key)
+        updates, opt_state = opt.update(grads, opt_state, ensemble_params)
+        ensemble_params = optax.apply_updates(ensemble_params, updates)
+        return ensemble_params, opt_state, loss
+    
+    return step, opt_state
+
+
+def train_se_ensemble(
+        ensemble,
+        obs,
+        act,
+        true,
+        cfg: EstimatorTrainConfig,
+        steps_override: Optional[int] = None,
+        key: Optional[jax.Array] = None,
+):
+    if key is None:
+        key = jr.PRNGKey(cfg.seed)
+    
+    steps = cfg.steps if steps_override is None else steps_override
+
+    step_fn, opt_state = make_se_ensemble_trainer(
+        ensemble,
+        lr=cfg.lr,
+        sample_mse_weight=cfg.sample_mse_weight,
+        burn_in=cfg.burn_in,
+        mass_weight=cfg.mass_weight,
+    )
+
+    n = true.shape[0]
+    losses: list[float] = []
+
+    for i in range(steps):
+        key, k_idx, k_step = jr.split(key, 3)
+        idx = jr.randint(k_idx, (cfg.batch_size), 0, n)
+        
+        obs_b = tree_take(obs, idx)
+        act_b = tree_take(act, idx)
+        true_b = true[idx]
+
+        ensemble, opt_state, loss = step_fn(ensemble, opt_state, obs_b, act_b, true_b, k_step)
+
+        if i % 100 == 0 or i==steps-1:
+            val = float(loss)
+            losses.append(val)
+            print(f"ensemble se step {i:5d} loss {val:.6f}")
+    
+    return ensemble, losses
+
+
 def train_estimator_ensemble(
     family: str,
     obs,
@@ -791,35 +948,23 @@ def train_estimator_ensemble(
     key: jax.Array,
 ):
 
-    build_member = ESTIMATOR_BUILDERS[family]
-    keys = jr.split(key, n_members)
-    trained = []
-    ini_carries = []
-    n = trues.shape[0]
-
-    for i, k in enumerate(keys):
-        member = build_member(k, arch)
-        idx_key = jr.PRNGKey(1000 + i)
-        idx = jr.randint(idx_key, (n,), 0, n)
-        obs_i = tree_take(obs, idx)
-        acts_i = tree_take(acts, idx)
-        trues_i = trues[idx]
-        trained_member, _ = train_se(
-            member,
-            obs_i,
-            acts_i,
-            trues_i,
-            cfg=train_cfg,
-            key=jr.PRNGKey(2000 + i),
-        )
-        trained.append(trained_member)
-        ini_carries.append(trained_member.initial_carry())
-
-    return StateEstimatorEnsemble(
-        estimators=tree_stack(trained),
-        initial_carry_template=tree_stack(ini_carries),
+    build_member = lambda k: ESTIMATOR_BUILDERS[family](k, arch)
+    
+    ensemble = StateEstimatorEnsemble.create(
         n_members=n_members,
+        key=key,
+        build_member=build_member,
     )
+
+    ensemble, _ = train_se_ensemble(
+        ensemble,
+        obs,
+        acts,
+        trues,
+        cfg=train_cfg,
+        key=jr.PRNGKey(train_cfg.seed),
+    )
+    return ensemble
 
 
 # -----------------------------------------------------------------------------
@@ -1285,7 +1430,7 @@ if __name__ == "__main__":
         n_ensemble_members=5,
         penalty_modes=("none", "aleatoric", "epistemic", "both"),
         output_root="./runs",
-        search=SearchConfig(enabled=True, trials=10),
+        search=SearchConfig(enabled=False, trials=10),
         checkpoint=CheckpointConfig(
             save_estimators=True,
             save_policies=True,
