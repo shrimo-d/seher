@@ -260,7 +260,7 @@ class StateEstimatorGRUGaussian:
 class EnsembleStateEstimate:
     """Aggregated output of a state estimator ensemble."""
     loc: jax.Array
-    inv_sps: jax.Array
+    inv_softplus_scale: jax.Array
     epistemic_std: jax.Array
     aleatoric_std: jax.Array
     member_locs: jax.Array
@@ -268,7 +268,7 @@ class EnsembleStateEstimate:
 
     @property
     def scale(self) -> jax.Array:
-        return scale_from_inv_sps(self.inv_sps)
+        return scale_from_inv_sps(self.inv_softplus_scale)
 
 
 @dataclass
@@ -338,7 +338,7 @@ class StateEstimatorEnsemble:
 
         estimate = EnsembleStateEstimate(
             loc=mean_loc,
-            inv_sps=total_inv_sps,
+            inv_softplus_scale=total_inv_sps,
             epistemic_std=epistemic_std,
             aleatoric_std=aleatoric_std,
             member_locs=member_locs,
