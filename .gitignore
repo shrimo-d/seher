@@ -20,3 +20,4 @@ runs/
 
 # Mac files
 .DS_Store
+examples/desperation/se_behavior.py

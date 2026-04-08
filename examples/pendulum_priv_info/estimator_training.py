@@ -23,207 +23,73 @@ from se_helpers import (
 def se_forward_sequence(se, obs_seq, act_seq, key):
     carry0 = se.initial_carry()
 
-    def step(carry, inp):
-        se_carry, k = carry
-        o, a = inp
-        k, k_step = jr.split(k, 2)
-        se_carry, est_out = se(se_carry, o, a, k_step)
-        return (se_carry, k), est_out
+    def step(se_carry, xs):
+        obs_t, act_t, key_t = xs
+        se_carry, est_out = se(se_carry, obs_t, act_t, key_t)
+        return se_carry, est_out
 
-    _, preds = jax.lax.scan(step, (carry0, key), (obs_seq, act_seq))
+    t_len = jax.tree_util.tree_leaves(obs_seq)[0].shape[0]
+    keys = jr.split(key, t_len)
+    _, preds = jax.lax.scan(step, carry0, (obs_seq, act_seq, keys))
     return preds
 
-@dataclass
-class NormalizedEstimatorOutputs:
-    loc: jax.Array
-    scale: jax.Array
-    is_stochastic: jax.Array
+def _trajectory_nll_loss(se, obs_seq, act_seq, true_seq, key):
+    carry0 = se.initial_carry()
+    t_len = true_seq.shape[0]
+    keys = jr.split(key, t_len)
 
-def normalize_single_outputs(outs: Any, burn_in: int) -> NormalizedEstimatorOutputs:
-    loc, scale = est_to_loc_scale(outs)
-    loc = loc[:, burn_in:]
-    scale = scale[:, burn_in:]
+    def step(carry, xs):
+        obs_t, act_t, true_t, key_t = xs
+        carry, est_out = se(carry, obs_t, act_t, key_t)
 
-    is_stochastic = jnp.any(scale > 0.0)
+        loc, scale = est_to_loc_scale(est_out)
+        loc = to_angle_augmented(loc)
+        true_t = to_angle_augmented(true_t)
+        angle_scale = jnp.mean(scale[0:2], axis=0, keepdims=True)
+        rest_scale = scale[2:]
+        scale = jnp.concatenate([angle_scale, rest_scale], axis=0)
+        scale = jnp.clip(scale, a_min=1e-4)
 
-    loc = loc[:, :, None, :]
-    scale = scale[:, :, None, :]
-    return NormalizedEstimatorOutputs(
-        loc=loc,
-        scale=scale,
-        is_stochastic=is_stochastic
-    )
+        nll_per_dim = gaussian_nll(true_t, loc, scale)
+        step_loss = jnp.sum(nll_per_dim, axis=-1)
 
-def normalize_ensemble_outputs(
-        outs: Any,
-        burn_in: int,
-        min_scale: float = 1e-8,
-) -> NormalizedEstimatorOutputs:
-    member_locs = outs.member_locs[:, burn_in:]
-    member_inv_sps = outs.member_inv_sps[:, burn_in:]
-
-    is_det = jnp.any(member_inv_sps < -25.0)
-    member_scales = jax.lax.cond(
-        is_det,
-        lambda _: jnp.zeros_like(member_locs),
-        lambda _: jnp.clip(scale_from_inv_sps(member_inv_sps), a_min=min_scale),
-        operand=None,
-    )
-    is_stochastic = jnp.logical_not(is_det)
-
-    return NormalizedEstimatorOutputs(
-        loc=member_locs,
-        scale=member_scales,
-        is_stochastic=is_stochastic,
-    )
-
-def _vmap_to_angle_augmented_members(x: jax.Array) -> jax.Array:
-    return jax.vmap(
-        jax.vmap(
-            jax.vmap(to_angle_augmented, in_axes=0),
-            in_axes=0,
-        ),
-        in_axes=0,
-    )(x)
-
-def _augment_scale_for_angle_representation(
-        raw_scale: jax.Array,
-        raw_loc: jax.Array,
-) -> jax.Array:
-    if raw_scale.shape[-1] == raw_loc.shape[-1]:
-        ang_scale = jnp.mean(raw_scale[..., 0:2], axis=-1, keepdims=True)
-        rest_scale = raw_scale[..., 2:]
-        return jnp.concatenate([ang_scale, rest_scale], axis=-1)
-    return raw_scale
-
-def augment_predictions_and_truth(
-        loc: jax.Array,
-        scale: jax.Array,
-        true: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    pred_aug = _vmap_to_angle_augmented_members(loc)
-    scale_aug = _augment_scale_for_angle_representation(scale, loc)
-    true_aug = to_angle_augmented(true)[:, :, None, :]
-    return pred_aug, scale_aug, true_aug
-
-def split_param_and_state(
-        pred_aug: jax.Array,
-        scale_aug: jax.Array,
-        true_aug: jax.Array,
-        spec: SystemSpec,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    param_idx = jnp.array(spec.parameter_indices_aug)
-    dyn_idx = jnp.array(spec.dynamic_indices_aug)
-
-    param_true = jnp.take(true_aug, param_idx, axis=-1)
-    param_pred = jnp.take(pred_aug, param_idx, axis=-1)
-    param_scale = jnp.clip(jnp.take(scale_aug, param_idx, axis=-1), 1e-4)
-
-    state_true = jnp.take(true_aug, dyn_idx, axis=-1)
-    state_pred = jnp.take(pred_aug, dyn_idx, axis=-1)
-    state_scale = jnp.clip(jnp.take(scale_aug, dyn_idx, axis=-1), 1e-4)
-
-    return param_true, param_pred, param_scale, state_true, state_pred, state_scale
-
-def estimator_loss(
-        pred: NormalizedEstimatorOutputs,
-        true: jax.Array,
-        spec: SystemSpec,
-        key: jax.Array,
-        sample_mse_weight: float = 0.0,
-        param_weight: float = 10.0,
-        use_param_smooth_penalty: bool = False,
-        param_smooth_weight: float = 0.0,
-        use_param_scale_penalty: bool = False,
-        param_scale_weight: float = 0.0,
-        max_param_scale: float = 0.15,
-) -> jax.Array:
-    pred_aug, scale_aug, true_aug = augment_predictions_and_truth(pred.loc, pred.scale, true)
-
-    (
-        param_true,
-        param_pred,
-        param_scale,
-        state_true,
-        state_pred,
-        state_scale,
-    ) = split_param_and_state(pred_aug, scale_aug, true_aug, spec)
-
-    param_step_mse = jnp.mean((param_pred - param_true) ** 2)
-    param_nll = jnp.mean(gaussian_nll(param_true, param_pred, param_scale))
-    param_step_mse = jnp.mean((param_pred[:, -1] - param_true[:, -1]) ** 2)
-    param_nll = jnp.mean(gaussian_nll(param_true[:, -1], param_pred[:, -1], param_scale[:, -1]))
-
-    state_mse = jnp.mean((state_pred - state_true) ** 2)
-    state_nll = jnp.mean(gaussian_nll(state_true, state_pred, state_scale))
-
-    if use_param_smooth_penalty:
-        param_smooth_penalty = jnp.mean((param_pred[:, 1:] - param_pred[:, :-1]) ** 2)
-    else:
-        param_smooth_penalty = 0.0
+        return carry, step_loss
     
-    if use_param_scale_penalty:
-        param_scale_penalty = jnp.mean(jnp.maximum(param_scale - max_param_scale, 0.0) ** 2)
-    else:
-        param_scale_penalty = 0.0
+    _, losses = jax.lax.scan(step, carry0, (obs_seq, act_seq, true_seq, keys))
+    return jnp.mean(losses)
+
+def _batch_loss(model_params, obs, act, true, key, burn_in: int):
+    if burn_in > 0:
+        obs = jax.tree_util.tree_map(lambda x: x[:, burn_in:], obs)
+        act = act[:, burn_in:]
+        true = true[:, burn_in:]
     
-    if sample_mse_weight > 0.0:
-        key, k_samp = jr.split(key, 2)
-        eps = jr.normal(k_samp, shape=pred_aug.shape)
-        y_samp = pred_aug + jnp.clip(scale_aug, 1e-4) * eps
-        sample_mse = jnp.mean((y_samp - true_aug) ** 2)
-    else:
-        sample_mse = 0.0
-    
-    loss = jax.lax.cond(
-        pred.is_stochastic,
-        lambda _: (
-            state_nll
-            + param_weight * param_nll
-            + param_smooth_weight * param_smooth_penalty
-            + param_scale_weight * param_scale_penalty
-            + sample_mse_weight * sample_mse
-        ),
-        lambda _: (
-            state_mse
-            + param_weight * param_step_mse
-            + param_smooth_weight * param_smooth_penalty
-        ),
-        operand=None,
-    )
-    return loss
+    bsz = true.shape[0]
+    keys = jr.split(key, bsz)
+
+    traj_losses = jax.vmap(
+        _trajectory_nll_loss,
+        in_axes=(None, 0,0,0,0),
+    )(model_params, obs, act, true, keys)
+
+    return jnp.mean(traj_losses)
 
 def make_generic_se_trainer(
         model,
-        spec: SystemSpec,
-        normalize_outputs_fn: Callable[[Any, int], NormalizedEstimatorOutputs],
         lr: float = 1e-3,
-        sample_mse_weight: float = 0.0,
         burn_in: int = 0,
-        param_weight: float = 10.0,
 ):
     opt = optax.adam(lr)
     opt_state = opt.init(model)
 
     def loss_fn(model_params, obs, act, true, key):
-        bsz = true.shape[0]
-        keys = jr.split(key, bsz)
-
-        outs = jax.vmap(
-            lambda oseq, aseq, k: se_forward_sequence(model_params, oseq, aseq, k),
-            in_axes=(0,0,0),
-        )(obs, act, keys)
-
-        pred = normalize_outputs_fn(outs, burn_in=burn_in)
-        true_trim = true[:, burn_in:]
-
-        return estimator_loss(
-            pred=pred,
-            true=true_trim,
-            spec=spec,
+        return _batch_loss(
+            model_params=model_params,
+            obs=obs,
+            act=act,
+            true=true,
             key=key,
-            sample_mse_weight=sample_mse_weight,
-            param_weight=param_weight,
+            burn_in=burn_in,
         )
     
     @jax.jit
@@ -239,36 +105,26 @@ def make_se_trainer(
         se,
         spec,
         lr: float = 1e-3,
-        sample_mse_weight: float = 0.0,
         burn_in: int = 0,
-        param_weight = 10.0,
 ):
+    del spec
     return make_generic_se_trainer(
         model=se,
-        spec=spec,
-        normalize_outputs_fn=normalize_single_outputs,
         lr=lr,
-        sample_mse_weight=sample_mse_weight,
         burn_in=burn_in,
-        param_weight=param_weight,
     )
 
 def make_se_ensemble_trainer(
         se,
         spec,
         lr: float = 1e-3,
-        sample_mse_weight: float = 0.0,
         burn_in: int = 0,
-        param_weight = 10.0,
 ):
+    del spec
     return make_generic_se_trainer(
         model=se,
-        spec=spec,
-        normalize_outputs_fn=normalize_ensemble_outputs,
         lr=lr,
-        sample_mse_weight=sample_mse_weight,
         burn_in=burn_in,
-        param_weight=param_weight,
     )
 
 def train_se(
@@ -285,13 +141,12 @@ def train_se(
         key = jr.PRNGKey(cfg.seed)
 
     steps = cfg.steps if steps_override is None else steps_override
+
     step_fn, opt_state = make_se_trainer(
         se,
         spec,
         lr=cfg.lr,
-        sample_mse_weight=cfg.sample_mse_weight,
         burn_in=cfg.burn_in,
-        param_weight=cfg.param_weight,
     )
 
     n = true.shape[0]
@@ -299,7 +154,7 @@ def train_se(
 
     for i in range(steps):
         key, k_idx, k_step = jr.split(key, 3)
-        idx = jr.randint(k_idx, (cfg.batch_size,), 0, n)
+        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=False)
 
         obs_b = tree_take(obs, idx)
         act_b = tree_take(act, idx)
@@ -333,9 +188,7 @@ def train_se_ensemble(
         ensemble,
         spec,
         lr=cfg.lr,
-        sample_mse_weight=cfg.sample_mse_weight,
         burn_in=cfg.burn_in,
-        param_weight=cfg.param_weight,
     )
 
     n = true.shape[0]
@@ -395,3 +248,23 @@ def train_estimator_ensemble(
         key=jr.PRNGKey(train_cfg.seed),
     )
     return ensemble
+
+def _outputs_to_loc_scale(outs: Any):
+    if hasattr(outs, "member_locs") and hasattr(outs, "member_inv_sps"):
+        loc = outs.member_locs
+        scale = jax.nn.softplus(outs.member_inv_sps -1.0) + 1e-4
+        return loc, scale
+    
+    loc, scale = est_to_loc_scale(outs)
+    return loc[:, None, :], scale[:, None, :]
+
+def normalize_single_outputs(outs: Any, burn_in: int):
+    loc, scale = est_to_loc_scale(outs)
+    loc = loc[:, burn_in:]
+    scale = scale[:, burn_in:]
+    loc = loc[:, :, None, :]
+    scale = scale[:, :, None, :]
+    return type("NormalizedEstimatorOutputs", (), {
+        "loc": loc,
+        "scale": scale,
+    })()

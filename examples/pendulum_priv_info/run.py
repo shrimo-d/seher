@@ -547,7 +547,7 @@ if __name__ == "__main__":
         data=DataConfig(
             policy_source="random-policy",
             n_traj=70000,
-            n_steps=100,
+            n_steps=200,
         ),
         rl=RLConfig(
             episode_length=100,
@@ -562,7 +562,7 @@ if __name__ == "__main__":
         ),
         se_train=EstimatorTrainConfig(
             steps=8000,
-            batch_size=64,
+            batch_size=100,
             lr=1e-3,
             burn_in=10,
             sample_mse_weight=0,
