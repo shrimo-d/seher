@@ -38,7 +38,7 @@ class RLConfig:
 class ArchitectureConfig:
     hidden_sizes: tuple[int, ...] = (32, 32)
     hidden_dim: int = 32
-    window_size: int = 5
+    window_size: int = 10
     use_layernorm: bool = False
 
 

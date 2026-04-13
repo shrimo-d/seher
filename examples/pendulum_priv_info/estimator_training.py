@@ -48,7 +48,6 @@ def _trajectory_nll_loss(se, obs_seq, act_seq, true_seq, key):
         angle_scale = jnp.mean(scale[0:2], axis=0, keepdims=True)
         rest_scale = scale[2:]
         scale = jnp.concatenate([angle_scale, rest_scale], axis=0)
-        scale = jnp.clip(scale, a_min=1e-4)
 
         nll_per_dim = gaussian_nll(true_t, loc, scale)
         step_loss = jnp.sum(nll_per_dim, axis=-1)
@@ -196,7 +195,7 @@ def train_se_ensemble(
 
     for i in range(steps):
         key, k_idx, k_step = jr.split(key, 3)
-        idx = jr.randint(k_idx, (cfg.batch_size,), 0, n)
+        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=False)
 
         obs_b = tree_take(obs, idx)
         act_b = tree_take(act, idx)

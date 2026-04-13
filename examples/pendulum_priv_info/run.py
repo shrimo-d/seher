@@ -29,24 +29,14 @@ from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import flax.struct
-import matplotlib.pyplot as plt
-import optax
-from datetime import datetime
+
 
 try:
     import optuna
 except Exception:  # pragma: no cover
     optuna = None
 
-from seher.apx_util import identity
-
 from seher.models.random_policy import RandomPolicy
-from seher.models.state_estimator import (
-    StateEstimatorGRUGaussian,
-    StateEstimatorMLP,
-    StateEstimatorMLPGaussian,
-)
 from seher.simulate import simulate
 from seher.systems.pendulum_po import PartiallyObservablePendulum
 from seher.systems.pendulum_ud import UnknownDynamicsPendulum
@@ -546,13 +536,13 @@ if __name__ == "__main__":
         ),
         data=DataConfig(
             policy_source="random-policy",
-            n_traj=70000,
-            n_steps=200,
+            n_traj=8000,
+            n_steps=100,
         ),
         rl=RLConfig(
             episode_length=100,
             steps_per_update=25,
-            n_simulations=16,
+            n_simulations=32,
             max_updates=15000,
         ),
         ud=UDPConfig(
@@ -561,10 +551,10 @@ if __name__ == "__main__":
             max_control_coeff=1.0,
         ),
         se_train=EstimatorTrainConfig(
-            steps=8000,
-            batch_size=100,
+            steps=6000,
+            batch_size=64,
             lr=1e-3,
-            burn_in=10,
+            burn_in=0,
             sample_mse_weight=0,
             param_weight=3,
         )
