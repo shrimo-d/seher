@@ -37,11 +37,12 @@ class TwoMassPendulum(PartiallyObservablePendulum):
         )
         return state.replace(true=true_state)
 
+
 @dataclass
 class Settings:
-    ensemble: bool=True
-    n_members: int=5
-    low_std: bool=False
+    ensemble: bool = True
+    n_members: int = 5
+    low_std: bool = False
 
 
 def eval_on_split(se, obs, act, true, key):
@@ -84,17 +85,17 @@ def _trajectory_loss_low_std(se, obs_seq, act_seq, true_seq, key):
         nll_per_dim = gaussian_nll(true_t, loc, 1e-8)
         step_loss = jnp.sum(nll_per_dim, axis=-1)
         return carry, step_loss
-    
+
     _, losses = jax.lax.scan(step, carry0, (obs_seq, act_seq, true_seq, keys))
     return jnp.mean(losses)
 
 
 def _batch_loss_low_std(model_params, obs, act, true, key, burn_in: int):
-    if burn_in>0:
+    if burn_in > 0:
         obs = jax.tree_util.tree_map(lambda x: x[:, burn_in:], obs)
         act = act[:, burn_in:]
         true = true[:, burn_in:]
-    
+
     bsz = true.shape[0]
     keys = jr.split(key, bsz)
 
@@ -107,9 +108,9 @@ def _batch_loss_low_std(model_params, obs, act, true, key, burn_in: int):
 
 
 def make_se_trainer_low_std(
-        se,
-        lr: float = 1e-3,
-        burn_in: int = 0,
+    se,
+    lr: float = 1e-3,
+    burn_in: int = 0,
 ):
     opt = optax.adam(lr)
     opt_state = opt.init(se)
@@ -123,28 +124,30 @@ def make_se_trainer_low_std(
             key=key,
             burn_in=burn_in,
         )
-    
+
     @jax.jit
     def step(model_params, opt_state, obs, act, true, key):
         loss, grads = jax.value_and_grad(loss_fn)(model_params, obs, act, true, key)
         updates, opt_state = opt.update(grads, opt_state, model_params)
         model_params = optax.apply_updates(model_params, updates)
         return model_params, opt_state, loss
+
     return step, opt_state
 
+
 def train_se_low_std(
-        se,
-        obs,
-        act,
-        true,
-        cfg: EstimatorTrainConfig,
-        spec: SystemSpec,
-        steps_override: Optional[int] = None,
-        key: Optional[jax.Array] = None,
+    se,
+    obs,
+    act,
+    true,
+    cfg: EstimatorTrainConfig,
+    spec: SystemSpec,
+    steps_override: Optional[int] = None,
+    key: Optional[jax.Array] = None,
 ):
     if key is None:
         key = jr.PRNGKey(cfg.seed)
-    
+
     steps = cfg.steps if steps_override is None else steps_override
 
     print(cfg.lr)
@@ -160,7 +163,7 @@ def train_se_low_std(
 
     for i in range(steps):
         key, k_idx, k_step = jr.split(key, 3)
-        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=False)
+        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=True)
 
         obs_b = tree_take(obs, idx)
         act_b = tree_take(act, idx)
@@ -168,17 +171,17 @@ def train_se_low_std(
 
         se, opt_state, loss = step_fn(se, opt_state, obs_b, act_b, true_b, k_step)
 
-        if i%100 == 0 or i == steps -1:
+        if i % 100 == 0 or i == steps - 1:
             val = float(loss)
             losses.append(val)
             print(f"se step {i:5d} loss {val:.6f}")
-    
+
     return se, losses
 
 
 def main(settings):
     arch = ArchitectureConfig(
-        hidden_sizes=[32,32],
+        hidden_sizes=[32, 32],
         hidden_dim=32,
         use_layernorm=False,
     )
@@ -262,7 +265,7 @@ def main(settings):
     print("MLP mass mse :", mlp_test_mass_mse)
     print("GRU total mse:", gru_test_mse)
     print("GRU mass mse :", gru_test_mass_mse)
-    #Plot results
+    # Plot results
     fig, axs = plt.subplots(2, 1, figsize=(8, 6))
     axs[0].plot(mlp_losses, label="mlp")
     axs[0].plot(gru_losses, label="gru")
@@ -281,7 +284,6 @@ def main(settings):
     plt.tight_layout()
     plt.show()
 
-
     fig, axs = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
     plot_mass_examples(axs[:2], mlp_test_loc[..., 3], test_true[..., 3], "MLP test")
     plot_mass_examples(axs[2:], gru_test_loc[..., 3], test_true[..., 3], "GRU test")
@@ -290,7 +292,9 @@ def main(settings):
 
 
 if __name__ == "__main__":
-    main(Settings(
-        ensemble=True,
-        low_std=True,
-    ))
+    main(
+        Settings(
+            ensemble=False,
+            low_std=True,
+        )
+    )

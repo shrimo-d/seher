@@ -5,6 +5,7 @@ takes the observation, puts it into the state estimator,
 and then gives a latent representation of the state estimator
 output to the policy.
 """
+
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -12,7 +13,14 @@ import jax.random as jr
 from typing import Callable, Any
 from flax.struct import dataclass, field
 from seher.apx_arch import MLP, GRUCell
-from seher.types import MDP, StateEstimator, LatentAdapter, StateEstimatorCarry, Observation, State
+from seher.types import (
+    MDP,
+    StateEstimator,
+    LatentAdapter,
+    StateEstimatorCarry,
+    Observation,
+    State,
+)
 from seher.jax_util import tree_stack
 
 
@@ -24,7 +32,7 @@ def softplus_inv(y: jax.Array, eps: float = 1e-8) -> jax.Array:
 
 def scale_from_inv_sps(inv_sps: jax.Array, min_scale: float = 1e-8) -> jax.Array:
     """Compute scale from inverse softplus scale."""
-    return jnp.clip(jax.nn.softplus(inv_sps), a_min=min_scale)
+    return jnp.clip(jax.nn.softplus(inv_sps), min=min_scale)
 
 
 @dataclass
@@ -34,7 +42,7 @@ class StateEstimate:
     Is used by every StateEstimator, even deterministic ones.
     Obviously inv_softplus_scale should be really small to minimize
     'accidental' stochasticity when calling self.scale for example.
-    
+
     Attributes
     ----------
     loc:
@@ -61,7 +69,7 @@ def sample_gaussian_estimate(est: StateEstimate, key: jax.Array) -> jax.Array:
 def push_window(hist: jax.Array, x: jax.Array) -> jax.Array:
     """Helper function for updating the sliding window / hidden
     states for the StateEstimator
-    
+
     """
     return jnp.concatenate([hist[1:], x[None, :]], axis=0)
 
@@ -76,10 +84,10 @@ class StateEstimatorMLPCarry:
 class StateEstimatorMLP:
     """Sliding-window estimator that outputs a deterministic
     state estimate.
-    
+
     The inv_softplus_scale of the output StateEstimate is always -30
     everywhere, so that sampling is basically deterministic.
-    
+
     Attributes
     ----------
     mlp:
@@ -96,8 +104,9 @@ class StateEstimatorMLP:
         Dimension of the observation array.
     control_dim:
         Dimension of the control array.
-        
+
     """
+
     mlp: MLP
     obs_to_array: Callable = field(pytree_node=False)
     control_to_array: Callable = field(pytree_node=False)
@@ -110,9 +119,9 @@ class StateEstimatorMLP:
             obs_hist=jnp.zeros((self.window_size, self.obs_dim)),
             control_hist=jnp.zeros((self.window_size, self.control_dim)),
         )
-    
+
     initial_carry.__doc__ = StateEstimator.initial_carry.__doc__
-    
+
     def __call__(self, carry: StateEstimatorMLPCarry, obs, control, key):
         del key
 
@@ -122,23 +131,25 @@ class StateEstimatorMLP:
         new_obs_hist = push_window(carry.obs_hist, o)
         new_control_hist = push_window(carry.control_hist, c)
 
-        x = jnp.concatenate([
-            new_obs_hist.reshape(-1), new_control_hist.reshape(-1)
-        ], axis=0)
+        x = jnp.concatenate(
+            [new_obs_hist.reshape(-1), new_control_hist.reshape(-1)], axis=0
+        )
 
         s_hat = self.mlp(x)
         new_carry = carry.replace(obs_hist=new_obs_hist, control_hist=new_control_hist)
-        return new_carry, StateEstimate(loc=s_hat, inv_softplus_scale=jnp.full_like(s_hat, -30.0))
-    
+        return new_carry, StateEstimate(
+            loc=s_hat, inv_softplus_scale=jnp.full_like(s_hat, -30.0)
+        )
+
     __call__.__doc__ = StateEstimator.__call__.__doc__
 
 
 @dataclass
 class StateEstimatorMLPGaussian:
     """Sliding-window estimator that outputs StateEstimate(loc, scale).
-    
+
     MLP output is size: 2*state_dim; first half: loc, second half: inv_softplus_scale
-    
+
     Attributes
     ----------
     mlp:
@@ -157,8 +168,9 @@ class StateEstimatorMLPGaussian:
         Dimension of the control array.
     state_dim:
         Dimension of the state array.
-    
+
     """
+
     mlp: MLP
     obs_to_array: Callable = field(pytree_node=False)
     control_to_array: Callable = field(pytree_node=False)
@@ -170,11 +182,11 @@ class StateEstimatorMLPGaussian:
     def initial_carry(self):
         return StateEstimatorMLPCarry(
             obs_hist=jnp.zeros((self.window_size, self.obs_dim)),
-            control_hist=jnp.zeros((self.window_size, self.control_dim))
+            control_hist=jnp.zeros((self.window_size, self.control_dim)),
         )
-    
+
     initial_carry.__doc__ = StateEstimator.initial_carry.__doc__
-    
+
     def __call__(self, carry: StateEstimatorMLPCarry, obs, control, key):
         del key
 
@@ -188,13 +200,13 @@ class StateEstimatorMLPGaussian:
             [new_obs_hist.reshape(-1), new_control_hist.reshape(-1)], axis=0
         )
         out = self.mlp(x)
-        loc = out[:self.state_dim]
-        inv_sps = out[self.state_dim:]
+        loc = out[: self.state_dim]
+        inv_sps = out[self.state_dim :]
 
         est = StateEstimate(loc=loc, inv_softplus_scale=inv_sps)
         new_carry = carry.replace(obs_hist=new_obs_hist, control_hist=new_control_hist)
         return new_carry, est
-    
+
     __call__.__doc__ = StateEstimator.__call__.__doc__
 
 
@@ -226,6 +238,7 @@ class StateEstimatorGRUGaussian:
         Dimension of the sate array.
 
     """
+
     gru: GRUCell
     head: MLP
 
@@ -236,9 +249,9 @@ class StateEstimatorGRUGaussian:
 
     def initial_carry(self):
         return StateEstimatorGRUCarry(h=jnp.zeros((self.hidden_dim,)))
-    
+
     initial_carry.__doc__ = StateEstimator.initial_carry.__doc__
-    
+
     def __call__(self, carry: StateEstimatorGRUCarry, obs, control, key):
         del key
         o = self.obs_to_array(obs)
@@ -248,8 +261,8 @@ class StateEstimatorGRUGaussian:
         h_new = self.gru(carry.h, x)
         out = self.head(h_new)
 
-        loc = out[:self.state_dim]
-        inv_sps = out[self.state_dim:]
+        loc = out[: self.state_dim]
+        inv_sps = out[self.state_dim :]
         est = StateEstimate(loc=loc, inv_softplus_scale=inv_sps)
         return carry.replace(h=h_new), est
 
@@ -264,7 +277,7 @@ class BeliefState:
 
 @dataclass
 class BeliefStateCarry:
-    orig_carry: Any #Needs to be the original Carry but it isnt a type in seher
+    orig_carry: Any  # Needs to be the original Carry but it isnt a type in seher
     belief_state: BeliefState
 
 
@@ -272,7 +285,7 @@ class BeliefStateCarry:
 class BeliefStateWrapper:
     """Wrapper that adds the belief state to the carry, which is then
     fed to the underlying state estimator as additional input.
-    
+
     Attributes
     ----------
     estimator:
@@ -282,9 +295,10 @@ class BeliefStateWrapper:
         Tuple of indexes for the StateEstimate.loc and StateEstimate.inv_softplus_scale
         arrays corresponding to the belief state.
     """
+
     estimator: StateEstimator
     obs_to_array: Callable = field(pytree_node=False)
-    belief_idx: tuple[int,...] = field(pytree_node=False)
+    belief_idx: tuple[int, ...] = field(pytree_node=False)
     use_belief_scale: bool = field(pytree_node=False, default=False)
     belief_momentum: float = field(pytree_node=False, default=0.0)
     detach_belief: bool = field(pytree_node=False, default=True)
@@ -300,7 +314,7 @@ class BeliefStateWrapper:
             orig_carry=se_carry,
             belief_state=belief_state,
         )
-    
+
     def __call__(self, carry: BeliefStateCarry, obs, control, key):
         obs_array = self.obs_to_array(obs)
         belief_loc = carry.belief_state.loc
@@ -309,12 +323,12 @@ class BeliefStateWrapper:
         if self.detach_belief:
             belief_loc = jax.lax.stop_gradient(belief_loc)
             belief_scale = jax.lax.stop_gradient(belief_scale)
-        
+
         if self.use_belief_scale:
             belief_input = jnp.concatenate([belief_loc, belief_scale], axis=-1)
         else:
             belief_input = belief_loc
-        
+
         mod_obs = jnp.concatenate([obs_array, belief_input], axis=-1)
 
         se_carry, est = self.estimator(carry.orig_carry, mod_obs, control, key)
@@ -327,12 +341,13 @@ class BeliefStateWrapper:
             a = self.belief_momentum
             new_belief_loc = a * carry.belief_state.loc + (1.0 - a) * new_belief_loc_raw
             new_belief_inv_sps = (
-                a * carry.belief_state.inv_softplus_scale + (1.0 - 1) * new_belief_inv_sps_raw
+                a * carry.belief_state.inv_softplus_scale
+                + (1.0 - 1) * new_belief_inv_sps_raw
             )
         else:
             new_belief_loc = new_belief_loc_raw
             new_belief_inv_sps = new_belief_inv_sps_raw
-        
+
         new_belief = BeliefState(
             loc=new_belief_loc,
             inv_softplus_scale=new_belief_inv_sps,
@@ -343,13 +358,14 @@ class BeliefStateWrapper:
             belief_state=new_belief,
         )
         return new_carry, est
-    
+
 
 @dataclass
 class MixtureStateEstimate:
     loc: jax.Array
     inv_softplus_scale: jax.Array
     logits: jax.Array
+
 
 def mixtrue_to_params(est: MixtureStateEstimate, eps: float = 1e-5):
     weights = jax.nn.softplus(est.logits)
@@ -370,7 +386,7 @@ class StateEstimatorGRUMixture:
 
     def initial_carry(self):
         return StateEstimatorGRUCarry(h=jnp.zeros((self.hidden_dim,)))
-    
+
     def __call__(self, carry, obs, control, key):
         del key
 
@@ -385,13 +401,13 @@ class StateEstimatorGRUMixture:
         D = self.state_dim
 
         idx = 0
-        loc = out[idx:idx+K*D].reshape(K, D)
-        idx += K*D
+        loc = out[idx : idx + K * D].reshape(K, D)
+        idx += K * D
 
-        inv_sps = out[idx:idx+K*D].reshape(K,D)
-        idx += K*D
-        
-        logits = out[idx:idx+K*D]
+        inv_sps = out[idx : idx + K * D].reshape(K, D)
+        idx += K * D
+
+        logits = out[idx : idx + K * D]
 
         est = MixtureStateEstimate(
             loc=loc,
@@ -402,10 +418,10 @@ class StateEstimatorGRUMixture:
         return carry.replace(h=h_new), est
 
 
-
 @dataclass
 class EnsembleStateEstimate:
     """Aggregated output of a state estimator ensemble."""
+
     loc: jax.Array
     inv_softplus_scale: jax.Array
     epistemic_std: jax.Array
@@ -421,6 +437,7 @@ class EnsembleStateEstimate:
 @dataclass
 class StateEstimatorEnsemble:
     """Generic ensemble for state estimators with same interface."""
+
     estimators: any
     initial_carry_template: any
     n_members: int = field(pytree_node=False)
@@ -433,7 +450,7 @@ class StateEstimatorEnsemble:
         build_member: Callable,
     ):
         """Creates a state estimator ensemble.
-        
+
         Parameters
         ----------
         n_members:
@@ -442,7 +459,7 @@ class StateEstimatorEnsemble:
             JaxRandomKey for downstream stochasticity.
         build_member:
             Callable that takes a key and returns an estimator object.
-        
+
         """
         keys = jr.split(key, n_members)
 
@@ -452,21 +469,21 @@ class StateEstimatorEnsemble:
         return cls(
             estimators=tree_stack(members),
             initial_carry_template=tree_stack(carries),
-            n_members=n_members
+            n_members=n_members,
         )
-    
+
     def initial_carry(self):
         return self.initial_carry_template
-    
+
     def __call__(self, carry, obs, control, key):
         keys = jr.split(key, self.n_members)
 
         def forward_single(estimator, est_carry, k):
             return estimator(est_carry, obs, control, k)
-        
+
         new_carries, member_estimates = jax.vmap(
             forward_single,
-            in_axes=(0,0,0),
+            in_axes=(0, 0, 0),
         )(self.estimators, carry, keys)
 
         member_locs = member_estimates.loc
@@ -497,12 +514,12 @@ class StateEstimatorEnsemble:
 @dataclass
 class MeanLatent:
     """Latent adapter that uses the mean as latent state.
-    
+
     Attributes
     ----------
     latent_dim:
         Dimension of the latent state.
-    
+
     """
 
     latent_dim: int = field(pytree_node=False)
@@ -510,21 +527,21 @@ class MeanLatent:
     def __call__(self, est, key):
         del key
         return jnp.asarray(est.loc).reshape((self.latent_dim,))
-    
+
     __call__.__doc__ = LatentAdapter.__call__.__doc__
 
 
 @dataclass
 class SampleLatent:
     """Latent adapter that samples a state from loc and scale normal distribution.
-    
+
     Attributes
     ----------
     latent_dim:
         Dimension of the latent state.
     min_scale:
         The minimum scale for clipping.
-    
+
     """
 
     latent_dim: int = field(pytree_node=False)
@@ -536,21 +553,21 @@ class SampleLatent:
         eps = jr.normal(key, shape=loc.shape)
         z = loc + scale * eps
         return jnp.asarray(z).reshape((self.latent_dim,))
-    
+
     __call__.__doc__ = LatentAdapter.__call__.__doc__
 
 
 @dataclass
 class FeatureLatent:
     """Latent adapter that concatenates loc and scale.
-    
+
     Attributes
     ----------
     latent_dim:
         Dimension of the latent state.
     min_scale:
         The minimum scale for clipping.
-    
+
     """
 
     latent_dim: int = field(pytree_node=False)
@@ -562,20 +579,21 @@ class FeatureLatent:
         scale = jnp.clip(est.scale, self.min_scale)
         z = jnp.concatenate([loc, scale], axis=-1)
         return jnp.asarray(z).reshape((self.latent_dim,))
-    
+
     __call__.__doc__ = LatentAdapter.__call__.__doc__
 
 
 @dataclass
 class MeanEnsembleLatent:
     """Latent adapter for ensembles that uses the mean as latent state.
-    
+
     Attributes
     ----------
     latent_dim:
         Dimension of the latent state.
-    
+
     """
+
     latent_dim: int = field(pytree_node=False)
 
     def __call__(self, est, key):
@@ -587,8 +605,9 @@ class MeanEnsembleLatent:
 class FeatureEnsembleLatent:
     """Latent adapter for ensembles that uses mean + uncertainty
     as features.
-    
+
     """
+
     latent_dim: int = field(pytree_node=False)
 
     def __call__(self, est, key):
@@ -604,9 +623,8 @@ class FeatureEnsembleLatent:
 
 @dataclass
 class ThompsonEnsembleLatent:
-    """Latent adapter for ensembles which samples loc from one member.
-    
-    """
+    """Latent adapter for ensembles which samples loc from one member."""
+
     latent_dim: int = field(pytree_node=False)
 
     def __call__(self, est, key):
@@ -614,15 +632,14 @@ class ThompsonEnsembleLatent:
         idx = jr.randint(key, shape=(), minval=0, maxval=n_members)
         z = est.member_locs[idx]
         return jnp.asarray(z).reshape((self.latent_dim,))
-    
+
     __call__.__doc__ = LatentAdapter.__call__.__doc__
-    
+
 
 @dataclass
 class SampleMeanGaussianLatent:
-    """Latent adapter that samples from the aggregated ensemble Gaussian.
-    
-    """
+    """Latent adapter that samples from the aggregated ensemble Gaussian."""
+
     latent_dim: int = field(pytree_node=False)
     min_scale: float = field(pytree_node=False, default=1e-4)
 
@@ -631,14 +648,14 @@ class SampleMeanGaussianLatent:
         eps = jr.normal(key, shape=est.loc.shape)
         z = est.loc + scale * eps
         return jnp.asarray(z).reshape((self.latent_dim,))
-    
+
     __call__.__doc__ = LatentAdapter.__call__.__doc__
 
 
 @dataclass
 class StateEstimatorMDPState:
     """State for the State Estimator MDP Wrapper.
-    
+
     Attributes
     ----------
     obs:
@@ -649,8 +666,9 @@ class StateEstimatorMDPState:
         Output of the state estimator.
     se_carry:
         Carry of the state estimator.
-    
+
     """
+
     obs: Observation
     latent: jax.Array
     est: State
@@ -673,8 +691,9 @@ class StateEstimatorMDP:
         Dimension of latent representation.
     penalty_fn:
         Callable that computes a penalty term for the cost.
-    
+
     """
+
     original_mdp: MDP
     estimator: StateEstimator
     adapter: LatentAdapter
@@ -686,22 +705,22 @@ class StateEstimatorMDP:
     @property
     def discount(self):
         return self.original_mdp.discount
-    
+
     @property
     def control_min(self):
         return self.original_mdp.control_min
-    
+
     @property
     def control_max(self):
         return self.original_mdp.control_max
-    
+
     def empty_control(self):
         return self.original_mdp.empty_control()
-    
+
     def cost(self, state, control, key):
         penalty = self.penalty_fn(state)
         return self.original_mdp.cost(state.obs, control, key) + penalty
-    
+
     def init(self, key):
         obs0 = self.original_mdp.init(key)
 
@@ -718,12 +737,11 @@ class StateEstimatorMDP:
             est=est0,
             se_carry=se_carry1,
         )
-    
+
     def transit(self, state: StateEstimatorMDPState, control, key):
         obs1 = self.original_mdp.transit(state.obs, control, key)
 
-
-        k1,k2 = jr.split(key, 2)
+        k1, k2 = jr.split(key, 2)
         se_carry1, est1 = self.estimator(state.se_carry, obs1, control, k1)
         z1 = self.adapter(est1, k2)
 
