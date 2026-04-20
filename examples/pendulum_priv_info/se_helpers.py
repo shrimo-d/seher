@@ -138,7 +138,7 @@ class NormalizedStateEstimatorGRUGaussian(StateEstimatorGRUGaussian):
 
 
 def _mlp_activations(n_hidden: int):
-    return [jax.nn.tanh] * n_hidden + [identity]
+    return [jax.nn.soft_sign] * n_hidden + [identity]
 
 
 def build_det_mlp_estimator(key: jax.Array, arch: ArchitectureConfig, spec: SystemSpec):

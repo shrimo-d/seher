@@ -194,6 +194,7 @@ def main(settings):
         hidden_sizes=[32, 32],
         hidden_dim=32,
         use_layernorm=False,
+        window_size=5,
     )
     spec = SystemSpec(
         name="po_pendulum",
@@ -229,9 +230,8 @@ def main(settings):
         mlp = build_sto_mlp_estimator(jr.PRNGKey(0), arch, spec)
         gru = build_sto_gru_estimator(jr.PRNGKey(777), arch, spec)
     # Create Trajectories
-    train = collect_se_dataset(mdp, rdm_pol, 100, 20, jr.PRNGKey(67))
-    test = train
-    # test = collect_se_dataset(mdp, rdm_pol, 4, 20, jr.PRNGKey(999))
+    train = collect_se_dataset(mdp, rdm_pol, 500, 20, jr.PRNGKey(67))
+    test = collect_se_dataset(mdp, rdm_pol, 4, 20, jr.PRNGKey(999))
 
     train_obs, train_act, train_true = extract_arrays(train, spec.true_to_array)
     test_obs, test_act, test_true = extract_arrays(test, spec.true_to_array)
