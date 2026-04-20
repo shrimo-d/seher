@@ -85,7 +85,7 @@ def build_sto_mlp_estimator(key: jax.Array):
         output_size=2,
         activations=[jax.nn.tanh, jax.nn.tanh, identity],
         key=key,
-        use_layernorm=True,
+        use_layernorm=False,
     )
     return FakeEstimatorMLP(
         mlp=mlp,

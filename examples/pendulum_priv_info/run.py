@@ -36,7 +36,7 @@ try:
 except Exception:  # pragma: no cover
     optuna = None
 
-from seher.models.random_policy import RandomPolicy
+from seher.models.random_policy import RandomPolicy, BangBangHoldPolicy
 from seher.simulate import simulate
 from seher.systems.pendulum_po import PartiallyObservablePendulum
 from seher.systems.pendulum_ud import UnknownDynamicsPendulum
@@ -98,7 +98,7 @@ def get_system_spec(cfg: ExperimentConfig) -> SystemSpec:
             normalize_loc=normalize_cos_sin_prefix,
             estimated_labels=("cos", "sin", "velocity", "mass"),
             dynamic_indices_aug=(0,1),
-            parameter_indices_aug=(2,),
+            parameter_indices=(3,),
         )
     
     if cfg.system_name == "ud_pendulum":
@@ -113,7 +113,7 @@ def get_system_spec(cfg: ExperimentConfig) -> SystemSpec:
             normalize_loc=normalize_cos_sin_prefix,
             estimated_labels=("cos", "sin", "velocity", *tuple(f"coeff_{i}" for i in range(n))),
             dynamic_indices_aug=(0,1),
-            parameter_indices_aug=tuple(range(2, 2+n)),
+            parameter_indices=tuple(range(3, 3+n)),
         )
     raise ValueError(f"Unkown system_name: {cfg.system_name}")
 
@@ -147,6 +147,8 @@ def make_supervision_policy(
     source = cfg.data.policy_source
     if source == "random-policy":
         return RandomPolicy(mdp=mdp)
+    if source == "bangbang-policy":
+        return BangBangHoldPolicy(mdp=mdp)
     if source == "oracle":
         if oracle_policy is None:
             loaded = maybe_load_policy(oracle_policy_ckpt_dir(run_dir))
@@ -521,13 +523,13 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
 
 if __name__ == "__main__":
     cfg = ExperimentConfig(
-        system_name="ud_pendulum",
+        system_name="po_pendulum",
         min_mass=0.9,
         max_mass=1.1,
-        estimator_families=("det_mlp", "sto_mlp", "sto_gru"),
+        estimator_families=("sto_mlp", "sto_gru"),
         use_ensemble=True,
         n_ensemble_members=5,
-        penalty_modes=("none", "aleatoric", "epistemic", "both"),
+        penalty_modes=("none",),#, "aleatoric", "epistemic", "both"),
         output_root="./runs",
         search=SearchConfig(enabled=False, trials=10, metric="param_mse"),
         checkpoint=CheckpointConfig(
@@ -536,14 +538,14 @@ if __name__ == "__main__":
         ),
         data=DataConfig(
             policy_source="random-policy",
-            n_traj=8000,
-            n_steps=100,
+            n_traj=70000,
+            n_steps=2000,
         ),
         rl=RLConfig(
             episode_length=100,
             steps_per_update=25,
             n_simulations=32,
-            max_updates=15000,
+            max_updates=32000,
         ),
         ud=UDPConfig(
             n_control=1,
@@ -557,6 +559,12 @@ if __name__ == "__main__":
             burn_in=0,
             sample_mse_weight=0,
             param_weight=3,
+        ),
+        arch=ArchitectureConfig(
+            hidden_sizes=[32,32],
+            hidden_dim=16,
+            window_size=15,
+            use_layernorm=False,
         )
     )
     run_experiment(cfg)

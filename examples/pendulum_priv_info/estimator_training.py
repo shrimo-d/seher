@@ -14,7 +14,6 @@ from configs import (
 )
 from se_helpers import (
     est_to_loc_scale,
-    to_angle_augmented,
     gaussian_nll,
     tree_take,
     ESTIMATOR_BUILDERS,
@@ -43,11 +42,6 @@ def _trajectory_nll_loss(se, obs_seq, act_seq, true_seq, key):
         carry, est_out = se(carry, obs_t, act_t, key_t)
 
         loc, scale = est_to_loc_scale(est_out)
-        loc = to_angle_augmented(loc)
-        true_t = to_angle_augmented(true_t)
-        angle_scale = jnp.mean(scale[0:2], axis=0, keepdims=True)
-        rest_scale = scale[2:]
-        scale = jnp.concatenate([angle_scale, rest_scale], axis=0)
 
         nll_per_dim = gaussian_nll(true_t, loc, scale)
         step_loss = jnp.sum(nll_per_dim, axis=-1)

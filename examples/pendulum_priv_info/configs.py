@@ -40,6 +40,7 @@ class ArchitectureConfig:
     hidden_dim: int = 32
     window_size: int = 10
     use_layernorm: bool = False
+    K: int = 3
 
 
 @dataclass
@@ -104,4 +105,5 @@ class SystemSpec:
 
     estimated_labels: tuple[str, ...]
     dynamic_indices_aug: tuple[int, ...]
-    parameter_indices_aug: tuple[int, ...]
+    parameter_indices: tuple[int, ...]
+    belief_momentum: float = 0.9

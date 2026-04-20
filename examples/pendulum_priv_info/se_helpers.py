@@ -13,6 +13,8 @@ from seher.models.state_estimator import (
     StateEstimatorMLP,
     StateEstimatorMLPGaussian,
     StateEstimatorGRUGaussian,
+    StateEstimatorGRUMixture,
+    BeliefStateWrapper,
 )
 
 from configs import ArchitectureConfig, SystemSpec
@@ -194,8 +196,68 @@ def build_sto_gru_estimator(key: jax.Array, arch: ArchitectureConfig, spec: Syst
         normalize_loc_fn=spec.normalize_loc,
     )
 
+def build_sto_gru_belief(key: jax.Array, arch: ArchitectureConfig, spec: SystemSpec):
+    k1, k2 = jr.split(key, 2)
+    gru = GRUCell.make(
+        in_dim=spec.obs_dim+len(spec.parameter_indices)+spec.control_dim,
+        hidden_dim=arch.hidden_dim,
+        key=k1,
+    )
+    mlp = MLP.make(
+        inpt_size=arch.hidden_dim,
+        layer_sizes=list(arch.hidden_sizes),
+        output_size=2*spec.state_dim,
+        activations=_mlp_activations(len(arch.hidden_sizes)),
+        key=k2,
+        use_layernorm=arch.use_layernorm,
+    )
+    se = NormalizedStateEstimatorGRUGaussian(
+        gru=gru,
+        head=mlp,
+        obs_to_array=identity,
+        control_to_array=identity,
+        hidden_dim=arch.hidden_dim,
+        state_dim=spec.state_dim,
+        normalize_loc_fn=spec.normalize_loc,
+    )
+    return BeliefStateWrapper(
+        estimator=se,
+        belief_idx=spec.parameter_indices,
+        obs_to_array=spec.obs_to_array,
+        belief_momentum=spec.belief_momentum,
+    )
+
+def build_gru_mixture_estimator(key, arch, spec):
+    k1, k2 = jr.split(key)
+    gru = GRUCell.make(
+        in_dim=spec.obs_dim+spec.control_dim,
+        hidden_dim=arch.hidden_dim,
+        key=k1,
+    )
+    K = arch.K
+    mlp = MLP.make(
+        inpt_size=arch.hidden_dim,
+        layer_sizes=list(arch.hidden_sizes),
+        output_size=K*(2*spec.state_dim) + K,
+        activations=_mlp_activations(len(arch.hidden_sizes)),
+        key=k2,
+        use_layernorm=arch.use_layernorm,
+    )
+    return StateEstimatorGRUMixture(
+        gru=gru,
+        head=mlp,
+        n_components=K,
+        obs_to_array=spec.obs_to_array,
+        control_to_array=identity,
+        hidden_dim=arch.hidden_dim,
+        state_dim=spec.state_dim,
+    )
+    
+
 ESTIMATOR_BUILDERS: dict[str, Callable[[jax.Array, ArchitectureConfig, SystemSpec], Any]] = {
     "det_mlp": build_det_mlp_estimator,
     "sto_mlp": build_sto_mlp_estimator,
     "sto_gru": build_sto_gru_estimator,
+    "gru_bel": build_sto_gru_belief,
+    "gru_mix": build_gru_mixture_estimator,
 }

@@ -257,6 +257,153 @@ class StateEstimatorGRUGaussian:
 
 
 @dataclass
+class BeliefState:
+    loc: jax.Array
+    inv_softplus_scale: jax.Array
+
+
+@dataclass
+class BeliefStateCarry:
+    orig_carry: Any #Needs to be the original Carry but it isnt a type in seher
+    belief_state: BeliefState
+
+
+@dataclass
+class BeliefStateWrapper:
+    """Wrapper that adds the belief state to the carry, which is then
+    fed to the underlying state estimator as additional input.
+    
+    Attributes
+    ----------
+    estimator:
+        Underlying state estimator. The input dimensions should match
+        obs_dim+belief_state_dim
+    belief_idx:
+        Tuple of indexes for the StateEstimate.loc and StateEstimate.inv_softplus_scale
+        arrays corresponding to the belief state.
+    """
+    estimator: StateEstimator
+    obs_to_array: Callable = field(pytree_node=False)
+    belief_idx: tuple[int,...] = field(pytree_node=False)
+    use_belief_scale: bool = field(pytree_node=False, default=False)
+    belief_momentum: float = field(pytree_node=False, default=0.0)
+    detach_belief: bool = field(pytree_node=False, default=True)
+
+    def initial_carry(self):
+        se_carry = self.estimator.initial_carry()
+        n_belief = len(self.belief_idx)
+        belief_state = BeliefState(
+            loc=jnp.zeros((n_belief,)),
+            inv_softplus_scale=jnp.full((n_belief,), fill_value=-30.0),
+        )
+        return BeliefStateCarry(
+            orig_carry=se_carry,
+            belief_state=belief_state,
+        )
+    
+    def __call__(self, carry: BeliefStateCarry, obs, control, key):
+        obs_array = self.obs_to_array(obs)
+        belief_loc = carry.belief_state.loc
+        belief_scale = carry.belief_state.inv_softplus_scale
+
+        if self.detach_belief:
+            belief_loc = jax.lax.stop_gradient(belief_loc)
+            belief_scale = jax.lax.stop_gradient(belief_scale)
+        
+        if self.use_belief_scale:
+            belief_input = jnp.concatenate([belief_loc, belief_scale], axis=-1)
+        else:
+            belief_input = belief_loc
+        
+        mod_obs = jnp.concatenate([obs_array, belief_input], axis=-1)
+
+        se_carry, est = self.estimator(carry.orig_carry, mod_obs, control, key)
+
+        idx = jnp.array(self.belief_idx)
+        new_belief_loc_raw = est.loc[idx]
+        new_belief_inv_sps_raw = est.inv_softplus_scale[idx]
+
+        if self.belief_momentum > 0.0:
+            a = self.belief_momentum
+            new_belief_loc = a * carry.belief_state.loc + (1.0 - a) * new_belief_loc_raw
+            new_belief_inv_sps = (
+                a * carry.belief_state.inv_softplus_scale + (1.0 - 1) * new_belief_inv_sps_raw
+            )
+        else:
+            new_belief_loc = new_belief_loc_raw
+            new_belief_inv_sps = new_belief_inv_sps_raw
+        
+        new_belief = BeliefState(
+            loc=new_belief_loc,
+            inv_softplus_scale=new_belief_inv_sps,
+        )
+
+        new_carry = carry.replace(
+            orig_carry=se_carry,
+            belief_state=new_belief,
+        )
+        return new_carry, est
+    
+
+@dataclass
+class MixtureStateEstimate:
+    loc: jax.Array
+    inv_softplus_scale: jax.Array
+    logits: jax.Array
+
+def mixtrue_to_params(est: MixtureStateEstimate, eps: float = 1e-5):
+    weights = jax.nn.softplus(est.logits)
+    scale = jax.nn.softplus(est.inv_softplus_scale) + eps
+    return weights, est.loc, scale
+
+
+@dataclass
+class StateEstimatorGRUMixture:
+    gru: GRUCell
+    head: MLP
+
+    obs_to_array: Callable = field(pytree_node=False)
+    control_to_array: Callable = field(pytree_node=False)
+    hidden_dim: int = field(pytree_node=False)
+    state_dim: int = field(pytree_node=False)
+    n_components: int = field(pytree_node=False)
+
+    def initial_carry(self):
+        return StateEstimatorGRUCarry(h=jnp.zeros((self.hidden_dim,)))
+    
+    def __call__(self, carry, obs, control, key):
+        del key
+
+        o = self.obs_to_array(obs)
+        c = self.control_to_array(control)
+        x = jnp.concatenate([o, c], axis=-1)
+
+        h_new = self.gru(carry.h, x)
+        out = self.head(h_new)
+
+        K = self.n_components
+        D = self.state_dim
+
+        idx = 0
+        loc = out[idx:idx+K*D].reshape(K, D)
+        idx += K*D
+
+        inv_sps = out[idx:idx+K*D].reshape(K,D)
+        idx += K*D
+        
+        logits = out[idx:idx+K*D]
+
+        est = MixtureStateEstimate(
+            loc=loc,
+            inv_softplus_scale=inv_sps,
+            logits=logits,
+        )
+
+        return carry.replace(h=h_new), est
+
+
+
+@dataclass
 class EnsembleStateEstimate:
     """Aggregated output of a state estimator ensemble."""
     loc: jax.Array
