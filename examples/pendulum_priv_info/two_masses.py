@@ -191,7 +191,7 @@ def train_se_low_std(
 
 def main(settings):
     arch = ArchitectureConfig(
-        hidden_sizes=[32, 32],
+        hidden_sizes=[64, 32],
         hidden_dim=32,
         use_layernorm=False,
         window_size=5,
@@ -213,7 +213,7 @@ def main(settings):
         batch_size=64,
         lr=1e-4,
     )
-    mdp = TwoMassPendulum(low_mass=0.5, high_mass=10.0)
+    mdp = TwoMassPendulum(low_mass=0.5, high_mass=2.0)
     rdm_pol = RandomPolicy(mdp=mdp)
     if settings.ensemble:
         mlp = StateEstimatorEnsemble.create(
