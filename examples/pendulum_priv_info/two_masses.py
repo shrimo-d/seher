@@ -1,29 +1,39 @@
 """Create trajectories with only two possible masses. Evaluate on training traj and test trajs created
 by using the same random policy.
 Additionally, test what happens when predicted std is set to very small!"""
-import jax
-import jax.random as jr
-import jax.numpy as jnp
-from flax.struct import dataclass
 
 from typing import Optional
 
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+import matplotlib.pyplot as plt
+import optax
+from configs import ArchitectureConfig, EstimatorTrainConfig, SystemSpec
+from estimator_training import se_forward_sequence, train_se, train_se_ensemble
+from flax.struct import dataclass
 from run import collect_se_dataset, extract_arrays
-from se_helpers import NormalizedStateEstimatorMLPGaussian, NormalizedStateEstimatorGRUGaussian, normalize_cos_sin_prefix, build_sto_mlp_estimator, build_sto_gru_estimator, pendulum_obs_to_array, oracle_obs_to_array, tree_take, est_to_loc_scale, gaussian_nll
-from configs import SystemSpec, ArchitectureConfig, EstimatorTrainConfig
-from estimator_training import train_se_ensemble, train_se, se_forward_sequence
-
+from se_helpers import (
+    NormalizedStateEstimatorGRUGaussian,
+    NormalizedStateEstimatorMLPGaussian,
+    build_sto_gru_estimator,
+    build_sto_mlp_estimator,
+    est_to_loc_scale,
+    gaussian_nll,
+    normalize_cos_sin_prefix,
+    oracle_obs_to_array,
+    pendulum_obs_to_array,
+    tree_take,
+)
 from seher.models.random_policy import RandomPolicy
 from seher.models.state_estimator import StateEstimatorEnsemble
 from seher.systems.pendulum_po import PartiallyObservablePendulum
 
-import matplotlib.pyplot as plt
-import optax
 
 @dataclass
 class TwoMassPendulum(PartiallyObservablePendulum):
-    high_mass: float = 2.
-    low_mass: float = 1.
+    high_mass: float = 2.0
+    low_mass: float = 1.0
 
     def init(self, key):
         key, in_key = jr.split(key)
@@ -194,15 +204,15 @@ def main(settings):
         true_to_array=oracle_obs_to_array,
         normalize_loc=normalize_cos_sin_prefix,
         estimated_labels=("cos", "sin", "velocity", "mass"),
-        dynamic_indices_aug=(0,1),
+        dynamic_indices_aug=(0, 1),
         parameter_indices=(3,),
     )
     cfg = EstimatorTrainConfig(
-        steps=6000,
+        steps=100000,
         batch_size=64,
-        lr=1e-3,
+        lr=1e-4,
     )
-    mdp = TwoMassPendulum(low_mass=0.5, high_mass=1.0)
+    mdp = TwoMassPendulum(low_mass=0.5, high_mass=10.0)
     rdm_pol = RandomPolicy(mdp=mdp)
     if settings.ensemble:
         mlp = StateEstimatorEnsemble.create(
@@ -218,46 +228,82 @@ def main(settings):
     else:
         mlp = build_sto_mlp_estimator(jr.PRNGKey(0), arch, spec)
         gru = build_sto_gru_estimator(jr.PRNGKey(777), arch, spec)
-    #Create Trajectories
-    train = collect_se_dataset(mdp, rdm_pol, 8000, 200, jr.PRNGKey(67))
-    test = collect_se_dataset(mdp, rdm_pol, 8, 100, jr.PRNGKey(999))
-
+    # Create Trajectories
+    train = collect_se_dataset(mdp, rdm_pol, 100, 20, jr.PRNGKey(67))
+    test = train
+    # test = collect_se_dataset(mdp, rdm_pol, 4, 20, jr.PRNGKey(999))
 
     train_obs, train_act, train_true = extract_arrays(train, spec.true_to_array)
     test_obs, test_act, test_true = extract_arrays(test, spec.true_to_array)
-    #Train all estimators (optionally: set predicted std to 1e-8)
+    # Train all estimators (optionally: set predicted std to 1e-8)
     if settings.ensemble:
         if settings.low_std:
-            mlp, mlp_losses = train_se_low_std(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se_low_std(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
+            mlp, mlp_losses = train_se_low_std(
+                mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            )
+            gru, gru_losses = train_se_low_std(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
         else:
-            mlp, mlp_losses = train_se_ensemble(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se_ensemble(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
+            mlp, mlp_losses = train_se_ensemble(
+                mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            )
+            gru, gru_losses = train_se_ensemble(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
     else:
         if settings.low_std:
-            mlp, mlp_losses = train_se_low_std(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se_low_std(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
+            mlp, mlp_losses = train_se_low_std(
+                mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            )
+            gru, gru_losses = train_se_low_std(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
         else:
-            mlp, mlp_losses = train_se(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
-    #Evaluate on trajectories from training set
-    mlp_train_preds, mlp_train_locs, mlp_train_scale, mlp_train_mse, mlp_train_mass_mse = eval_on_split(
-        mlp, tree_take(train_obs, jnp.arange(8)), tree_take(train_act, jnp.arange(8)), train_true[:8], jr.PRNGKey(111)
+            mlp, mlp_losses = train_se(
+                mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            )
+            gru, gru_losses = train_se(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
+    # Evaluate on trajectories from training set
+    (
+        mlp_train_preds,
+        mlp_train_locs,
+        mlp_train_scale,
+        mlp_train_mse,
+        mlp_train_mass_mse,
+    ) = eval_on_split(
+        mlp,
+        tree_take(train_obs, jnp.arange(8)),
+        tree_take(train_act, jnp.arange(8)),
+        train_true[:8],
+        jr.PRNGKey(111),
     )
-    gru_train_preds, gru_train_locs, gru_train_scale, gru_train_mse, gru_train_mass_mse = eval_on_split(
-        mlp, tree_take(train_obs, jnp.arange(8)), tree_take(train_act, jnp.arange(8)), train_true[:8], jr.PRNGKey(222)
+    (
+        gru_train_preds,
+        gru_train_locs,
+        gru_train_scale,
+        gru_train_mse,
+        gru_train_mass_mse,
+    ) = eval_on_split(
+        mlp,
+        tree_take(train_obs, jnp.arange(8)),
+        tree_take(train_act, jnp.arange(8)),
+        train_true[:8],
+        jr.PRNGKey(222),
     )
     print("TRAIN")
     print("MLP total mse: ", mlp_train_mse)
     print("MLP Mass mse: ", mlp_train_mass_mse)
     print("GRU total mse: ", gru_train_mse)
     print("GRU mass mse: ", gru_train_mass_mse)
-    #Evaluate on trajectories from test set
-    mlp_test_preds, mlp_test_loc, mlp_test_scale, mlp_test_mse, mlp_test_mass_mse = eval_on_split(
-        mlp, test_obs, test_act, test_true, jr.PRNGKey(333)
+    # Evaluate on trajectories from test set
+    mlp_test_preds, mlp_test_loc, mlp_test_scale, mlp_test_mse, mlp_test_mass_mse = (
+        eval_on_split(mlp, test_obs, test_act, test_true, jr.PRNGKey(333))
     )
-    gru_test_preds, gru_test_loc, gru_test_scale, gru_test_mse, gru_test_mass_mse = eval_on_split(
-        gru, test_obs, test_act, test_true, jr.PRNGKey(444)
+    gru_test_preds, gru_test_loc, gru_test_scale, gru_test_mse, gru_test_mass_mse = (
+        eval_on_split(gru, test_obs, test_act, test_true, jr.PRNGKey(444))
     )
 
     print("TEST")
