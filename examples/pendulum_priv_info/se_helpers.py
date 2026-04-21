@@ -19,20 +19,26 @@ from seher.models.state_estimator import (
 
 from configs import ArchitectureConfig, SystemSpec
 
+
 def pendulum_obs_to_array(state):
     return state.obs.cos_sin_repr()
+
 
 def oracle_obs_to_array(state):
     return state.true.cos_sin_repr()
 
+
 def latent_obs_to_array(state):
     return state.latent
+
 
 def latent_state_to_array(state):
     return state.latent
 
+
 def oracle_state_to_array(state):
     return state.true.cos_sin_repr()
+
 
 def normalize_cos_sin_prefix(x: jax.Array, eps: float = 1e-6) -> jax.Array:
     cos = x[..., 0:1]
@@ -48,14 +54,16 @@ def to_angle_augmented(x: jax.Array) -> jax.Array:
     return jnp.concatenate([angle, rest], axis=-1)
 
 
-def est_to_loc_scale(est_out: Any, min_scale: float = 1e-8) -> tuple[jax.Array, jax.Array]:
+def est_to_loc_scale(
+    est_out: Any, min_scale: float = 1e-8
+) -> tuple[jax.Array, jax.Array]:
     if hasattr(est_out, "loc") and hasattr(est_out, "scale"):
         loc = est_out.loc
         is_det = jnp.any(est_out.inv_softplus_scale < -25)
         scale = jax.lax.cond(
             is_det,
             lambda est_: jnp.zeros_like(est_.loc),
-            lambda est_: jnp.clip(est_.scale, a_min=min_scale),
+            lambda est_: jnp.clip(est_.scale, min=min_scale),
             operand=est_out,
         )
         return loc, scale
@@ -74,6 +82,7 @@ def tree_take(pytree: Any, idx: jax.Array) -> Any:
 def tree_slice_time(pytree: Any, burn_in: int) -> Any:
     return jax.tree_util.tree_map(lambda x: x[:, burn_in:], pytree)
 
+
 POLICY_OBS_REGISTRY = {
     "oracle_obs_to_array": oracle_obs_to_array,
     "latent_obs_to_array": latent_obs_to_array,
@@ -88,6 +97,7 @@ ESTIMATOR_CONTROL_REGISTRY = {
     "identity": identity,
 }
 
+
 @dataclass
 class NormalizedStateEstimatorMLP(StateEstimatorMLP):
     normalize_loc_fn: Optional[Callable[[jax.Array], jax.Array]] = field(
@@ -99,7 +109,7 @@ class NormalizedStateEstimatorMLP(StateEstimatorMLP):
         if self.normalize_loc_fn is None:
             return new_carry, est
         return new_carry, est.replace(loc=self.normalize_loc_fn(est.loc))
-    
+
 
 @dataclass
 class NormalizedStateEstimatorMLPGaussian(StateEstimatorMLPGaussian):
@@ -125,9 +135,10 @@ class NormalizedStateEstimatorGRUGaussian(StateEstimatorGRUGaussian):
         if self.normalize_loc_fn is None:
             return new_carry, est
         return new_carry, est.replace(loc=self.normalize_loc_fn(est.loc))
-    
+
+
 def _mlp_activations(n_hidden: int):
-    return [jax.nn.tanh] * n_hidden + [identity]
+    return [jax.nn.soft_sign] * n_hidden + [identity]
 
 
 def build_det_mlp_estimator(key: jax.Array, arch: ArchitectureConfig, spec: SystemSpec):
@@ -174,14 +185,12 @@ def build_sto_mlp_estimator(key: jax.Array, arch: ArchitectureConfig, spec: Syst
 def build_sto_gru_estimator(key: jax.Array, arch: ArchitectureConfig, spec: SystemSpec):
     k1, k2 = jr.split(key, 2)
     gru = GRUCell.make(
-        in_dim=spec.obs_dim+spec.control_dim,
-        hidden_dim=arch.hidden_dim,
-        key=k1
+        in_dim=spec.obs_dim + spec.control_dim, hidden_dim=arch.hidden_dim, key=k1
     )
     mlp = MLP.make(
         inpt_size=arch.hidden_dim,
         layer_sizes=list(arch.hidden_sizes),
-        output_size=2*spec.state_dim,
+        output_size=2 * spec.state_dim,
         activations=_mlp_activations(len(arch.hidden_sizes)),
         key=k2,
         use_layernorm=arch.use_layernorm,
@@ -196,17 +205,18 @@ def build_sto_gru_estimator(key: jax.Array, arch: ArchitectureConfig, spec: Syst
         normalize_loc_fn=spec.normalize_loc,
     )
 
+
 def build_sto_gru_belief(key: jax.Array, arch: ArchitectureConfig, spec: SystemSpec):
     k1, k2 = jr.split(key, 2)
     gru = GRUCell.make(
-        in_dim=spec.obs_dim+len(spec.parameter_indices)+spec.control_dim,
+        in_dim=spec.obs_dim + len(spec.parameter_indices) + spec.control_dim,
         hidden_dim=arch.hidden_dim,
         key=k1,
     )
     mlp = MLP.make(
         inpt_size=arch.hidden_dim,
         layer_sizes=list(arch.hidden_sizes),
-        output_size=2*spec.state_dim,
+        output_size=2 * spec.state_dim,
         activations=_mlp_activations(len(arch.hidden_sizes)),
         key=k2,
         use_layernorm=arch.use_layernorm,
@@ -227,10 +237,11 @@ def build_sto_gru_belief(key: jax.Array, arch: ArchitectureConfig, spec: SystemS
         belief_momentum=spec.belief_momentum,
     )
 
+
 def build_gru_mixture_estimator(key, arch, spec):
     k1, k2 = jr.split(key)
     gru = GRUCell.make(
-        in_dim=spec.obs_dim+spec.control_dim,
+        in_dim=spec.obs_dim + spec.control_dim,
         hidden_dim=arch.hidden_dim,
         key=k1,
     )
@@ -238,7 +249,7 @@ def build_gru_mixture_estimator(key, arch, spec):
     mlp = MLP.make(
         inpt_size=arch.hidden_dim,
         layer_sizes=list(arch.hidden_sizes),
-        output_size=K*(2*spec.state_dim) + K,
+        output_size=K * (2 * spec.state_dim) + K,
         activations=_mlp_activations(len(arch.hidden_sizes)),
         key=k2,
         use_layernorm=arch.use_layernorm,
@@ -252,9 +263,11 @@ def build_gru_mixture_estimator(key, arch, spec):
         hidden_dim=arch.hidden_dim,
         state_dim=spec.state_dim,
     )
-    
 
-ESTIMATOR_BUILDERS: dict[str, Callable[[jax.Array, ArchitectureConfig, SystemSpec], Any]] = {
+
+ESTIMATOR_BUILDERS: dict[
+    str, Callable[[jax.Array, ArchitectureConfig, SystemSpec], Any]
+] = {
     "det_mlp": build_det_mlp_estimator,
     "sto_mlp": build_sto_mlp_estimator,
     "sto_gru": build_sto_gru_estimator,

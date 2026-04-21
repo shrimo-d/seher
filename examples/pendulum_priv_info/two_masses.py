@@ -1,29 +1,39 @@
 """Create trajectories with only two possible masses. Evaluate on training traj and test trajs created
 by using the same random policy.
 Additionally, test what happens when predicted std is set to very small!"""
-import jax
-import jax.random as jr
-import jax.numpy as jnp
-from flax.struct import dataclass
 
 from typing import Optional
 
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+import matplotlib.pyplot as plt
+import optax
+from configs import ArchitectureConfig, EstimatorTrainConfig, SystemSpec
+from estimator_training import se_forward_sequence, train_se, train_se_ensemble
+from flax.struct import dataclass
 from run import collect_se_dataset, extract_arrays
-from se_helpers import NormalizedStateEstimatorMLPGaussian, NormalizedStateEstimatorGRUGaussian, normalize_cos_sin_prefix, build_sto_mlp_estimator, build_sto_gru_estimator, pendulum_obs_to_array, oracle_obs_to_array, tree_take, est_to_loc_scale, gaussian_nll
-from configs import SystemSpec, ArchitectureConfig, EstimatorTrainConfig
-from estimator_training import train_se_ensemble, train_se, se_forward_sequence
-
+from se_helpers import (
+    NormalizedStateEstimatorGRUGaussian,
+    NormalizedStateEstimatorMLPGaussian,
+    build_sto_gru_estimator,
+    build_sto_mlp_estimator,
+    est_to_loc_scale,
+    gaussian_nll,
+    normalize_cos_sin_prefix,
+    oracle_obs_to_array,
+    pendulum_obs_to_array,
+    tree_take,
+)
 from seher.models.random_policy import RandomPolicy
 from seher.models.state_estimator import StateEstimatorEnsemble
 from seher.systems.pendulum_po import PartiallyObservablePendulum
 
-import matplotlib.pyplot as plt
-import optax
 
 @dataclass
 class TwoMassPendulum(PartiallyObservablePendulum):
-    high_mass: float = 2.
-    low_mass: float = 1.
+    high_mass: float = 2.0
+    low_mass: float = 1.0
 
     def init(self, key):
         key, in_key = jr.split(key)
@@ -37,11 +47,25 @@ class TwoMassPendulum(PartiallyObservablePendulum):
         )
         return state.replace(true=true_state)
 
+
+@dataclass
+class ManyMassPendulum(PartiallyObservablePendulum):
+    masses = jnp.array([0.5, 1.0, 1.5, 2.0])
+
+    def init(self, key):
+        key, in_key = jr.split(key)
+        state = super().init(in_key)
+        mass = jr.choice(key, self.masses)
+        true_state = state.true.replace(mass=jnp.array((mass,)))
+
+        return state.replace(true=true_state)
+
+
 @dataclass
 class Settings:
-    ensemble: bool=True
-    n_members: int=5
-    low_std: bool=False
+    ensemble: bool = True
+    n_members: int = 5
+    low_std: bool = False
 
 
 def eval_on_split(se, obs, act, true, key):
@@ -66,7 +90,8 @@ def plot_mass_examples(axs, pred_mass, true_mass, title):
     for i in range(n_plot):
         axs[i].plot(true_mass[i], label="true mass")
         axs[i].plot(pred_mass[i], label="pred mass")
-        axs[i].set_title(f"{title} traj {i}")
+        # axs[i].set_title(f"{title} traj {i}")
+        axs[i].set_ylim(0.4, 2.1)
         axs[i].grid(True)
     axs[0].legend()
 
@@ -84,17 +109,17 @@ def _trajectory_loss_low_std(se, obs_seq, act_seq, true_seq, key):
         nll_per_dim = gaussian_nll(true_t, loc, 1e-8)
         step_loss = jnp.sum(nll_per_dim, axis=-1)
         return carry, step_loss
-    
+
     _, losses = jax.lax.scan(step, carry0, (obs_seq, act_seq, true_seq, keys))
     return jnp.mean(losses)
 
 
 def _batch_loss_low_std(model_params, obs, act, true, key, burn_in: int):
-    if burn_in>0:
+    if burn_in > 0:
         obs = jax.tree_util.tree_map(lambda x: x[:, burn_in:], obs)
         act = act[:, burn_in:]
         true = true[:, burn_in:]
-    
+
     bsz = true.shape[0]
     keys = jr.split(key, bsz)
 
@@ -107,9 +132,9 @@ def _batch_loss_low_std(model_params, obs, act, true, key, burn_in: int):
 
 
 def make_se_trainer_low_std(
-        se,
-        lr: float = 1e-3,
-        burn_in: int = 0,
+    se,
+    lr: float = 1e-3,
+    burn_in: int = 0,
 ):
     opt = optax.adam(lr)
     opt_state = opt.init(se)
@@ -123,28 +148,30 @@ def make_se_trainer_low_std(
             key=key,
             burn_in=burn_in,
         )
-    
+
     @jax.jit
     def step(model_params, opt_state, obs, act, true, key):
         loss, grads = jax.value_and_grad(loss_fn)(model_params, obs, act, true, key)
         updates, opt_state = opt.update(grads, opt_state, model_params)
         model_params = optax.apply_updates(model_params, updates)
         return model_params, opt_state, loss
+
     return step, opt_state
 
+
 def train_se_low_std(
-        se,
-        obs,
-        act,
-        true,
-        cfg: EstimatorTrainConfig,
-        spec: SystemSpec,
-        steps_override: Optional[int] = None,
-        key: Optional[jax.Array] = None,
+    se,
+    obs,
+    act,
+    true,
+    cfg: EstimatorTrainConfig,
+    spec: SystemSpec,
+    steps_override: Optional[int] = None,
+    key: Optional[jax.Array] = None,
 ):
     if key is None:
         key = jr.PRNGKey(cfg.seed)
-    
+
     steps = cfg.steps if steps_override is None else steps_override
 
     print(cfg.lr)
@@ -160,7 +187,7 @@ def train_se_low_std(
 
     for i in range(steps):
         key, k_idx, k_step = jr.split(key, 3)
-        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=False)
+        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=True)
 
         obs_b = tree_take(obs, idx)
         act_b = tree_take(act, idx)
@@ -168,19 +195,20 @@ def train_se_low_std(
 
         se, opt_state, loss = step_fn(se, opt_state, obs_b, act_b, true_b, k_step)
 
-        if i%100 == 0 or i == steps -1:
+        if i % 100 == 0 or i == steps - 1:
             val = float(loss)
             losses.append(val)
             print(f"se step {i:5d} loss {val:.6f}")
-    
+
     return se, losses
 
 
 def main(settings):
     arch = ArchitectureConfig(
-        hidden_sizes=[32,32],
-        hidden_dim=32,
+        hidden_sizes=[128, 64],
+        hidden_dim=64,
         use_layernorm=False,
+        window_size=5,
     )
     spec = SystemSpec(
         name="po_pendulum",
@@ -191,15 +219,18 @@ def main(settings):
         true_to_array=oracle_obs_to_array,
         normalize_loc=normalize_cos_sin_prefix,
         estimated_labels=("cos", "sin", "velocity", "mass"),
-        dynamic_indices_aug=(0,1),
+        dynamic_indices_aug=(0, 1),
         parameter_indices=(3,),
     )
     cfg = EstimatorTrainConfig(
-        steps=6000,
+        steps=100000,
         batch_size=64,
-        lr=1e-3,
+        lr=1e-4,
     )
-    mdp = TwoMassPendulum(low_mass=0.5, high_mass=1.0)
+    # mdp = TwoMassPendulum(low_mass=0.5, high_mass=2.0)
+    # mdp = PartiallyObservablePendulum(min_mass=0.5, max_mass=2.0)
+    mdp = ManyMassPendulum()
+
     rdm_pol = RandomPolicy(mdp=mdp)
     if settings.ensemble:
         mlp = StateEstimatorEnsemble.create(
@@ -215,65 +246,104 @@ def main(settings):
     else:
         mlp = build_sto_mlp_estimator(jr.PRNGKey(0), arch, spec)
         gru = build_sto_gru_estimator(jr.PRNGKey(777), arch, spec)
-    #Create Trajectories
-    train = collect_se_dataset(mdp, rdm_pol, 8000, 200, jr.PRNGKey(67))
-    test = collect_se_dataset(mdp, rdm_pol, 8, 100, jr.PRNGKey(999))
-
+    # Create Trajectories
+    train = collect_se_dataset(mdp, rdm_pol, 2000, 40, jr.PRNGKey(67))
+    test = collect_se_dataset(mdp, rdm_pol, 10, 40, jr.PRNGKey(999))
 
     train_obs, train_act, train_true = extract_arrays(train, spec.true_to_array)
     test_obs, test_act, test_true = extract_arrays(test, spec.true_to_array)
-    #Train all estimators (optionally: set predicted std to 1e-8)
+    # Train all estimators (optionally: set predicted std to 1e-8)
     if settings.ensemble:
         if settings.low_std:
-            mlp, mlp_losses = train_se_low_std(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se_low_std(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
+            mlp, mlp_losses = train_se_low_std(
+                mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            )
+            gru, gru_losses = train_se_low_std(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
         else:
-            mlp, mlp_losses = train_se_ensemble(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se_ensemble(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
+            mlp, mlp_losses = train_se_ensemble(
+                mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            )
+            gru, gru_losses = train_se_ensemble(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
     else:
         if settings.low_std:
-            mlp, mlp_losses = train_se_low_std(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se_low_std(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
+            # mlp, mlp_losses = train_se_low_std(
+            #     mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            # )
+            gru, gru_losses = train_se_low_std(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
         else:
-            mlp, mlp_losses = train_se(mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000))
-            gru, gru_losses = train_se(gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000))
-    #Evaluate on trajectories from training set
-    mlp_train_preds, mlp_train_locs, mlp_train_scale, mlp_train_mse, mlp_train_mass_mse = eval_on_split(
-        mlp, tree_take(train_obs, jnp.arange(8)), tree_take(train_act, jnp.arange(8)), train_true[:8], jr.PRNGKey(111)
-    )
-    gru_train_preds, gru_train_locs, gru_train_scale, gru_train_mse, gru_train_mass_mse = eval_on_split(
-        mlp, tree_take(train_obs, jnp.arange(8)), tree_take(train_act, jnp.arange(8)), train_true[:8], jr.PRNGKey(222)
+            mlp, mlp_losses = train_se(
+                mlp, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(2000)
+            )
+            gru, gru_losses = train_se(
+                gru, train_obs, train_act, train_true, cfg, spec, key=jr.PRNGKey(3000)
+            )
+    # Evaluate on trajectories from training set
+    # (
+    #     mlp_train_preds,
+    #     mlp_train_locs,
+    #     mlp_train_scale,
+    #     mlp_train_mse,
+    #     mlp_train_mass_mse,
+    # ) = eval_on_split(
+    #     mlp,
+    #     tree_take(train_obs, jnp.arange(8)),
+    #     tree_take(train_act, jnp.arange(8)),
+    #     train_true[:8],
+    #     jr.PRNGKey(111),
+    # )
+    (
+        gru_train_preds,
+        gru_train_locs,
+        gru_train_scale,
+        gru_train_mse,
+        gru_train_mass_mse,
+    ) = eval_on_split(
+        mlp,
+        tree_take(train_obs, jnp.arange(8)),
+        tree_take(train_act, jnp.arange(8)),
+        train_true[:8],
+        jr.PRNGKey(222),
     )
     print("TRAIN")
-    print("MLP total mse: ", mlp_train_mse)
-    print("MLP Mass mse: ", mlp_train_mass_mse)
+    # print("MLP total mse: ", mlp_train_mse)
+    # print("MLP Mass mse: ", mlp_train_mass_mse)
     print("GRU total mse: ", gru_train_mse)
     print("GRU mass mse: ", gru_train_mass_mse)
-    #Evaluate on trajectories from test set
-    mlp_test_preds, mlp_test_loc, mlp_test_scale, mlp_test_mse, mlp_test_mass_mse = eval_on_split(
-        mlp, test_obs, test_act, test_true, jr.PRNGKey(333)
+    # Evaluate on trajectories from test set
+    mlp_test_preds, mlp_test_loc, mlp_test_scale, mlp_test_mse, mlp_test_mass_mse = (
+        eval_on_split(mlp, test_obs, test_act, test_true, jr.PRNGKey(333))
     )
-    gru_test_preds, gru_test_loc, gru_test_scale, gru_test_mse, gru_test_mass_mse = eval_on_split(
-        gru, test_obs, test_act, test_true, jr.PRNGKey(444)
+    gru_test_preds, gru_test_loc, gru_test_scale, gru_test_mse, gru_test_mass_mse = (
+        eval_on_split(gru, test_obs, test_act, test_true, jr.PRNGKey(444))
     )
 
     print("TEST")
-    print("MLP total mse:", mlp_test_mse)
-    print("MLP mass mse :", mlp_test_mass_mse)
+    # print("MLP total mse:", mlp_test_mse)
+    # print("MLP mass mse :", mlp_test_mass_mse)
     print("GRU total mse:", gru_test_mse)
     print("GRU mass mse :", gru_test_mass_mse)
-    #Plot results
+    # Plot results
     fig, axs = plt.subplots(2, 1, figsize=(8, 6))
-    axs[0].plot(mlp_losses, label="mlp")
+    # axs[0].plot(mlp_losses, label="mlp")
     axs[0].plot(gru_losses, label="gru")
     axs[0].set_title("train losses")
     axs[0].set_yscale("log")
     axs[0].grid(True)
     axs[0].legend()
 
+    # axs[1].bar(
+    #     ["mlp_train", "gru_train", "mlp_test", "gru_test"],
+    #     [mlp_train_mass_mse, gru_train_mass_mse, mlp_test_mass_mse, gru_test_mass_mse],
+    # )
     axs[1].bar(
-        ["mlp_train", "gru_train", "mlp_test", "gru_test"],
-        [mlp_train_mass_mse, gru_train_mass_mse, mlp_test_mass_mse, gru_test_mass_mse],
+        ["gru_train", "gru_test"],
+        [gru_train_mass_mse, gru_test_mass_mse],
     )
     axs[1].set_title("mass mse")
     axs[1].grid(True)
@@ -281,16 +351,17 @@ def main(settings):
     plt.tight_layout()
     plt.show()
 
-
-    fig, axs = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
-    plot_mass_examples(axs[:2], mlp_test_loc[..., 3], test_true[..., 3], "MLP test")
-    plot_mass_examples(axs[2:], gru_test_loc[..., 3], test_true[..., 3], "GRU test")
+    fig, axs = plt.subplots(10, 1, figsize=(10, 10), sharex=True)
+    # plot_mass_examples(axs[:2], mlp_test_loc[..., 3], test_true[..., 3], "MLP test")
+    plot_mass_examples(axs, gru_test_loc[..., 3], test_true[..., 3], "GRU test")
     plt.tight_layout()
     plt.show()
 
 
 if __name__ == "__main__":
-    main(Settings(
-        ensemble=True,
-        low_std=True,
-    ))
+    main(
+        Settings(
+            ensemble=False,
+            low_std=True,
+        )
+    )

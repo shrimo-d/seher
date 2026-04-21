@@ -12,15 +12,18 @@ class RandomPolicy:
     sigma: float = field(pytree_node=False, default=0.2)
 
     def __call__(self, carry, obs, control, key):
-        z_t1 = jr.normal(key, shape=self.mdp.empty_control().shape)
-        z_t1 = self.z + z_t1 * self.sigma
-        final = jnp.clip(z_t1, a_min=self.mdp.control_min, a_max=self.mdp.control_max)
+        final = jr.uniform(
+            key,
+            shape=self.mdp.empty_control().shape,
+            minval=self.mdp.control_min,
+            maxval=self.mdp.control_max,
+        )
         self.replace(z=final)
         return None, final
 
     def initial_carry(self):
         return None
-    
+
 
 @dataclass
 class BangBangHoldPolicy:

@@ -58,7 +58,12 @@ from naming_helpers import (
     save_json,
     ensure_run_dir,
 )
-from plot_helpers import get_plot_specs, save_trajectory_plot, save_attribute_plot, att_from_est
+from plot_helpers import (
+    get_plot_specs,
+    save_trajectory_plot,
+    save_attribute_plot,
+    att_from_est,
+)
 from estimator_training import (
     se_forward_sequence,
     train_se,
@@ -97,23 +102,28 @@ def get_system_spec(cfg: ExperimentConfig) -> SystemSpec:
             true_to_array=oracle_obs_to_array,
             normalize_loc=normalize_cos_sin_prefix,
             estimated_labels=("cos", "sin", "velocity", "mass"),
-            dynamic_indices_aug=(0,1),
+            dynamic_indices_aug=(0, 1),
             parameter_indices=(3,),
         )
-    
+
     if cfg.system_name == "ud_pendulum":
         n = cfg.ud.n_control
         return SystemSpec(
             name="ud_pendulum",
             obs_dim=3,
             control_dim=n,
-            state_dim=3+n,
+            state_dim=3 + n,
             obs_to_array=pendulum_obs_to_array,
             true_to_array=oracle_obs_to_array,
             normalize_loc=normalize_cos_sin_prefix,
-            estimated_labels=("cos", "sin", "velocity", *tuple(f"coeff_{i}" for i in range(n))),
-            dynamic_indices_aug=(0,1),
-            parameter_indices=tuple(range(3, 3+n)),
+            estimated_labels=(
+                "cos",
+                "sin",
+                "velocity",
+                *tuple(f"coeff_{i}" for i in range(n)),
+            ),
+            dynamic_indices_aug=(0, 1),
+            parameter_indices=tuple(range(3, 3 + n)),
         )
     raise ValueError(f"Unkown system_name: {cfg.system_name}")
 
@@ -137,13 +147,14 @@ def make_mdp(cfg: ExperimentConfig) -> PartiallyObservablePendulum:
         )
     raise ValueError(f"Unkwon system_name: {cfg.system_name}")
 
+
 def make_supervision_policy(
-        mdp: PartiallyObservablePendulum,
-        cfg: ExperimentConfig,
-        run_dir: Path,
-        oracle_policy=None,
-        trained_policies: Optional[dict[str, dict[str, Any]]] = None
-    ):
+    mdp: PartiallyObservablePendulum,
+    cfg: ExperimentConfig,
+    run_dir: Path,
+    oracle_policy=None,
+    trained_policies: Optional[dict[str, dict[str, Any]]] = None,
+):
     source = cfg.data.policy_source
     if source == "random-policy":
         return RandomPolicy(mdp=mdp)
@@ -153,14 +164,20 @@ def make_supervision_policy(
         if oracle_policy is None:
             loaded = maybe_load_policy(oracle_policy_ckpt_dir(run_dir))
             if loaded is None:
-                raise ValueError("Oracle Policy requested for data collection, but no policy avaliable")
+                raise ValueError(
+                    "Oracle Policy requested for data collection, but no policy avaliable"
+                )
             return loaded
         return oracle_policy
-    
+
     if source == "trained-policy":
         family = cfg.data.trained_policy_family
         mode = cfg.data.trained_policy_mode
-        if trained_policies is not None and family in trained_policies and mode in trained_policies[family]:
+        if (
+            trained_policies is not None
+            and family in trained_policies
+            and mode in trained_policies[family]
+        ):
             return trained_policies[family][mode]
         loaded = maybe_load_policy(policy_ckpt_dir(run_dir, family, mode))
         if loaded is None:
@@ -171,7 +188,9 @@ def make_supervision_policy(
 
 def collect_se_dataset(mdp, policy, n_traj: int, n_steps: int, key: jax.Array):
     keys = jr.split(key, n_traj)
-    return jax.vmap(lambda k: simulate(mdp=mdp, policy=policy, n_steps=n_steps, key=k))(keys)
+    return jax.vmap(lambda k: simulate(mdp=mdp, policy=policy, n_steps=n_steps, key=k))(
+        keys
+    )
 
 
 def extract_arrays(histories, true_to_array: Callable[[Any], jax.Array]):
@@ -186,9 +205,13 @@ def extract_arrays(histories, true_to_array: Callable[[Any], jax.Array]):
 # -----------------------------------------------------------------------------
 
 
-def evaluate_estimator_supervised(se, obs, act, true, burn_in: int, spec: SystemSpec, seed: int = 0) -> dict[str, float]:
+def evaluate_estimator_supervised(
+    se, obs, act, true, burn_in: int, spec: SystemSpec, seed: int = 0
+) -> dict[str, float]:
     keys = jr.split(jr.PRNGKey(seed), true.shape[0])
-    outs = jax.vmap(lambda oseq, aseq, k: se_forward_sequence(se, oseq, aseq, k), in_axes=(0, 0, 0))(obs, act, keys)
+    outs = jax.vmap(
+        lambda oseq, aseq, k: se_forward_sequence(se, oseq, aseq, k), in_axes=(0, 0, 0)
+    )(obs, act, keys)
     norm_out = normalize_single_outputs(outs, burn_in=burn_in)
     loc = norm_out.loc
     scale = norm_out.scale
@@ -222,6 +245,7 @@ def evaluate_estimator_supervised(se, obs, act, true, burn_in: int, spec: System
         member_disagreement = jnp.mean(jnp.var(loc, axis=2))
         metrics["member_disagreement"] = float(member_disagreement)
     return metrics
+
 
 def evaluate_policy_mean_cost(policy, mdp, rl_cfg: RLConfig, key: jax.Array) -> float:
     keys = jr.split(key, rl_cfg.eval_rollouts)
@@ -269,8 +293,24 @@ def optuna_objective(
         estimator = ESTIMATOR_BUILDERS[family](key, arch, spec)
         local_train_cfg = EstimatorTrainConfig(**asdict(train_cfg))
         local_train_cfg.steps = search_cfg.estimator_steps
-        estimator, _ = train_se(estimator, obs_train, act_train, true_train, local_train_cfg, spec=spec, key=key)
-        metrics = evaluate_estimator_supervised(estimator, obs_val, act_val, true_val, burn_in=local_train_cfg.burn_in, spec=spec, seed=trial.number)
+        estimator, _ = train_se(
+            estimator,
+            obs_train,
+            act_train,
+            true_train,
+            local_train_cfg,
+            spec=spec,
+            key=key,
+        )
+        metrics = evaluate_estimator_supervised(
+            estimator,
+            obs_val,
+            act_val,
+            true_val,
+            burn_in=local_train_cfg.burn_in,
+            spec=spec,
+            seed=trial.number,
+        )
         trial.set_user_attr("metrics", metrics)
         trial.set_user_attr("arch", asdict(arch))
         if search_cfg.metric == "param_mse":
@@ -291,12 +331,18 @@ def run_architecture_search(
     spec: SystemSpec,
 ) -> dict[str, ArchitectureConfig]:
     if optuna is None:
-        raise RuntimeError("Optuna is not installed, but search.enabled=True was requested.")
+        raise RuntimeError(
+            "Optuna is not installed, but search.enabled=True was requested."
+        )
 
     n = trues.shape[0]
     n_train = int(0.8 * n)
-    obs_train, obs_val = tree_take(obs, jnp.arange(n_train)), tree_take(obs, jnp.arange(n_train, n))
-    act_train, act_val = tree_take(acts, jnp.arange(n_train)), tree_take(acts, jnp.arange(n_train, n))
+    obs_train, obs_val = tree_take(obs, jnp.arange(n_train)), tree_take(
+        obs, jnp.arange(n_train, n)
+    )
+    act_train, act_val = tree_take(acts, jnp.arange(n_train)), tree_take(
+        acts, jnp.arange(n_train, n)
+    )
     true_train, true_val = trues[:n_train], trues[n_train:]
 
     best_arches: dict[str, ArchitectureConfig] = {}
@@ -304,7 +350,10 @@ def run_architecture_search(
 
     for family in cfg.estimator_families:
         print(f"\n=== Optuna search for {family} ===")
-        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=cfg.search.seed))
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=optuna.samplers.TPESampler(seed=cfg.search.seed),
+        )
         study.optimize(
             optuna_objective(
                 family,
@@ -334,7 +383,6 @@ def run_architecture_search(
     return best_arches
 
 
-
 # -----------------------------------------------------------------------------
 # Main experiment pipeline
 # -----------------------------------------------------------------------------
@@ -355,7 +403,7 @@ def train_family_estimator(
         loaded = maybe_load_estimator(run_dir, family)
         if loaded is not None:
             return loaded
-    
+
     if cfg.use_ensemble:
         return train_estimator_ensemble(
             family=family,
@@ -370,8 +418,10 @@ def train_family_estimator(
         )
     else:
         estimator = ESTIMATOR_BUILDERS[family](key, arch, spec)
-        estimator, _ = train_se(estimator, obs, acts, trues, cfg=cfg.se_train, spec=spec, key=key)
-    
+        estimator, _ = train_se(
+            estimator, obs, acts, trues, cfg=cfg.se_train, spec=spec, key=key
+        )
+
     if cfg.checkpoint.save_estimators and not cfg.use_ensemble:
         maybe_save_estimator(run_dir, family, estimator)
 
@@ -388,7 +438,13 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     supervision_policy = make_supervision_policy(mdp, cfg, run_dir)
 
     print("\n=== Collecting supervised estimator dataset ===")
-    histories = collect_se_dataset(mdp, supervision_policy, cfg.data.n_traj, cfg.data.n_steps, jr.PRNGKey(cfg.data.seed))
+    histories = collect_se_dataset(
+        mdp,
+        supervision_policy,
+        cfg.data.n_traj,
+        cfg.data.n_steps,
+        jr.PRNGKey(cfg.data.seed),
+    )
     obs, acts, trues = extract_arrays(histories, spec.true_to_array)
 
     arch_per_family = {family: cfg.arch for family in cfg.estimator_families}
@@ -405,7 +461,7 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     oracle_policy = None
     if cfg.checkpoint.load_policies:
         oracle_policy = maybe_load_policy(oracle_policy_ckpt_dir(run_dir))
-    
+
     if oracle_policy is None:
         oracle_solver = build_oracle_solver(cfg.rl)
         oracle_solver.solve(mdp, jr.PRNGKey(5))
@@ -428,7 +484,17 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     for family in cfg.estimator_families:
         print(f"\n=== Training estimator family: {family} ===")
         arch = arch_per_family[family]
-        estimator = train_family_estimator(family, obs, acts, trues, cfg, arch, spec, jr.PRNGKey(hash(family) % (2**31 - 1)), run_dir)
+        estimator = train_family_estimator(
+            family,
+            obs,
+            acts,
+            trues,
+            cfg,
+            arch,
+            spec,
+            jr.PRNGKey(hash(family) % (2**31 - 1)),
+            run_dir,
+        )
         estimator = jax.lax.stop_gradient(estimator)
         trained_estimators[family] = estimator
 
@@ -455,16 +521,20 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
 
         for mode in modes:
             print(f"\n--- Training RL policy for {family} / {mode} ---")
-            wrapped = build_state_estimator_mdp(mdp, estimator, spec, cfg.use_ensemble, mode)
+            wrapped = build_state_estimator_mdp(
+                mdp, estimator, spec, cfg.use_ensemble, mode
+            )
             wrapped_mdps[family][mode] = wrapped
             policy = None
             ckpt_dir = policy_ckpt_dir(run_dir, family, mode)
             if cfg.checkpoint.load_policies:
                 policy = maybe_load_policy(ckpt_dir)
-            
+
             if policy is None:
                 solver = build_solver(cfg.rl)
-                solver.solve(wrapped, jr.PRNGKey(abs(hash((family, mode))) % (2**31 - 1)))
+                solver.solve(
+                    wrapped, jr.PRNGKey(abs(hash((family, mode))) % (2**31 - 1))
+                )
                 policy = solver.policy
                 if cfg.checkpoint.save_policies:
                     maybe_save_policy(
@@ -472,7 +542,7 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
                         policy,
                         obs_adapter_name="latent_obs_to_array",
                     )
-            
+
             policies[family][mode] = policy
             metrics[family][f"rl_{mode}"] = {
                 "eval_cost": evaluate_policy_mean_cost(
@@ -487,7 +557,12 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     save_json(run_dir / "metrics" / "summary_metrics.json", metrics)
 
     print("\n=== Creating plots ===")
-    save_trajectory_plot("Oracle-Policy", mdp, oracle_policy, run_dir / "plots" / "Oracle-Policy_trajectories.png")
+    save_trajectory_plot(
+        "Oracle-Policy",
+        mdp,
+        oracle_policy,
+        run_dir / "plots" / "Oracle-Policy_trajectories.png",
+    )
 
     plot_specs = get_plot_specs(cfg, spec)
 
@@ -496,7 +571,8 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
 
         for mode in modes:
             save_trajectory_plot(
-                f"{family}_{mode}", wrapped_mdps[family][mode],
+                f"{family}_{mode}",
+                wrapped_mdps[family][mode],
                 policies[family][mode],
                 run_dir / "plots" / f"{family}_{mode}_trajectories.png",
             )
@@ -504,7 +580,14 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         for plot_name, idx, ylim in plot_specs:
             family_variants = []
             for mode in modes:
-                family_variants.append((mode, policies[family][mode], att_from_est(idx), wrapped_mdps[family][mode]))
+                family_variants.append(
+                    (
+                        mode,
+                        policies[family][mode],
+                        att_from_est(idx),
+                        wrapped_mdps[family][mode],
+                    )
+                )
             save_attribute_plot(
                 title=f"{family}_{plot_name}_estimation",
                 variants=family_variants,
@@ -529,7 +612,7 @@ if __name__ == "__main__":
         estimator_families=("sto_mlp", "sto_gru"),
         use_ensemble=True,
         n_ensemble_members=5,
-        penalty_modes=("none",),#, "aleatoric", "epistemic", "both"),
+        penalty_modes=("none",),  # , "aleatoric", "epistemic", "both"),
         output_root="./runs",
         search=SearchConfig(enabled=False, trials=10, metric="param_mse"),
         checkpoint=CheckpointConfig(
@@ -561,10 +644,10 @@ if __name__ == "__main__":
             param_weight=3,
         ),
         arch=ArchitectureConfig(
-            hidden_sizes=[32,32],
+            hidden_sizes=[32, 32],
             hidden_dim=16,
             window_size=15,
             use_layernorm=False,
-        )
+        ),
     )
     run_experiment(cfg)
