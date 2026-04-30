@@ -32,7 +32,38 @@ def se_forward_sequence(se, obs_seq, act_seq, key):
     _, preds = jax.lax.scan(step, carry0, (obs_seq, act_seq, keys))
     return preds
 
-def _trajectory_nll_loss(se, obs_seq, act_seq, true_seq, key):
+
+def mse_loss_single(est_out, true_t):
+    loc, _ = est_to_loc_scale(est_out)
+    return jnp.sum((loc-true_t)**2)
+
+
+def nll_loss_single(est_out, true_t):
+    loc, scale = est_to_loc_scale(est_out)
+    nll_per_dim = gaussian_nll(true_t, loc, scale)
+    return jnp.sum(nll_per_dim)
+
+
+def mse_loss_ensemble_members(est_out, true_t):
+    true_rep = jnp.broadcast_to(true_t[None, :], est_out.member_locs.shape)
+
+    sq = (est_out.member_locs - true_rep) ** 2
+    per_member_loss = jnp.sum(sq, axis=-1)
+
+    return jnp.mean(per_member_loss)
+
+
+def nll_loss_ensemble_members(est_out, true_t):
+    true_rep = jnp.broadcast_to(true_t[None, :], est_out.member_locs.shape)
+
+    scale = scale_from_inv_sps(est_out.member_inv_sps)
+    nll_per_dim = gaussian_nll(true_rep, est_out.member_locs, scale)
+    per_member_loss = jnp.sum(nll_per_dim, axis=-1)
+
+    return jnp.mean(per_member_loss)
+
+
+def _trajectory_loss(se, obs_seq, act_seq, true_seq, key, estimate_loss_fn):
     carry0 = se.initial_carry()
     t_len = true_seq.shape[0]
     keys = jr.split(key, t_len)
@@ -41,36 +72,37 @@ def _trajectory_nll_loss(se, obs_seq, act_seq, true_seq, key):
         obs_t, act_t, true_t, key_t = xs
         carry, est_out = se(carry, obs_t, act_t, key_t)
 
-        loc, scale = est_to_loc_scale(est_out)
-
-        nll_per_dim = gaussian_nll(true_t, loc, scale)
-        step_loss = jnp.sum(nll_per_dim, axis=-1)
+        step_loss = estimate_loss_fn(est_out, true_t)
 
         return carry, step_loss
     
     _, losses = jax.lax.scan(step, carry0, (obs_seq, act_seq, true_seq, keys))
     return jnp.mean(losses)
 
-def _batch_loss(model_params, obs, act, true, key, burn_in: int):
-    if burn_in > 0:
-        obs = jax.tree_util.tree_map(lambda x: x[:, burn_in:], obs)
-        act = act[:, burn_in:]
-        true = true[:, burn_in:]
-    
+
+def _batch_loss(model_params, obs, act, true, key, estimate_loss_fn):
     bsz = true.shape[0]
     keys = jr.split(key, bsz)
 
     traj_losses = jax.vmap(
-        _trajectory_nll_loss,
-        in_axes=(None, 0,0,0,0),
-    )(model_params, obs, act, true, keys)
+        lambda o, a, y, k: _trajectory_loss(
+            model_params,
+            o,
+            a,
+            y,
+            k,
+            estimate_loss_fn,
+        ),
+        in_axes=(0,0,0,0),
+    )(obs, act, true, keys)
 
     return jnp.mean(traj_losses)
+
 
 def make_generic_se_trainer(
         model,
         lr: float = 1e-3,
-        burn_in: int = 0,
+        estimate_loss_fn = nll_loss_single,
 ):
     opt = optax.adam(lr)
     opt_state = opt.init(model)
@@ -82,7 +114,7 @@ def make_generic_se_trainer(
             act=act,
             true=true,
             key=key,
-            burn_in=burn_in,
+            estimate_loss_fn=estimate_loss_fn,
         )
     
     @jax.jit
@@ -94,52 +126,27 @@ def make_generic_se_trainer(
     
     return step, opt_state
 
-def make_se_trainer(
-        se,
-        spec,
-        lr: float = 1e-3,
-        burn_in: int = 0,
-):
-    del spec
-    return make_generic_se_trainer(
-        model=se,
-        lr=lr,
-        burn_in=burn_in,
-    )
 
-def make_se_ensemble_trainer(
-        se,
-        spec,
-        lr: float = 1e-3,
-        burn_in: int = 0,
-):
-    del spec
-    return make_generic_se_trainer(
-        model=se,
-        lr=lr,
-        burn_in=burn_in,
-    )
-
-def train_se(
-    se,
+def train_estimator(
+    model,
     obs,
     act,
     true,
     cfg: EstimatorTrainConfig,
-    spec: SystemSpec,
     steps_override: Optional[int] = None,
     key: Optional[jax.Array] = None,
 ):
     if key is None:
         key = jr.PRNGKey(cfg.seed)
+    if cfg.estimate_loss_fn is None:
+        raise ValueError("cfg.estimate_loss_fn cannot be None")
 
     steps = cfg.steps if steps_override is None else steps_override
 
-    step_fn, opt_state = make_se_trainer(
-        se,
-        spec,
+    step_fn, opt_state = make_generic_se_trainer(
+        model,
         lr=cfg.lr,
-        burn_in=cfg.burn_in,
+        estimate_loss_fn=cfg.estimate_loss_fn,
     )
 
     n = true.shape[0]
@@ -153,63 +160,14 @@ def train_se(
         act_b = tree_take(act, idx)
         true_b = true[idx]
 
-        se, opt_state, loss = step_fn(se, opt_state, obs_b, act_b, true_b, k_step)
+        model, opt_state, loss = step_fn(model, opt_state, obs_b, act_b, true_b, k_step)
 
         if i % 100 == 0 or i == steps - 1:
             val = float(loss)
             losses.append(val)
             print(f"se step {i:5d} loss {val:.6f}")
 
-    return se, losses
-
-
-def train_se_ensemble(
-    ensemble,
-    obs,
-    act,
-    true,
-    cfg: EstimatorTrainConfig,
-    spec: SystemSpec,
-    steps_override: Optional[int] = None,
-    key: Optional[jax.Array] = None,
-):
-    if key is None:
-        key = jr.PRNGKey(cfg.seed)
-
-    steps = cfg.steps if steps_override is None else steps_override
-    step_fn, opt_state = make_se_ensemble_trainer(
-        ensemble,
-        spec,
-        lr=cfg.lr,
-        burn_in=cfg.burn_in,
-    )
-
-    n = true.shape[0]
-    losses: list[float] = []
-
-    for i in range(steps):
-        key, k_idx, k_step = jr.split(key, 3)
-        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=False)
-
-        obs_b = tree_take(obs, idx)
-        act_b = tree_take(act, idx)
-        true_b = true[idx]
-
-        ensemble, opt_state, loss = step_fn(
-            ensemble,
-            opt_state,
-            obs_b,
-            act_b,
-            true_b,
-            k_step,
-        )
-
-        if i % 100 == 0 or i == steps - 1:
-            val = float(loss)
-            losses.append(val)
-            print(f"ensemble se step {i:5d} loss {val:.6f}")
-
-    return ensemble, losses
+    return model, losses
 
 
 def train_estimator_ensemble(
@@ -219,7 +177,7 @@ def train_estimator_ensemble(
     trues,
     n_members: int,
     arch: ArchitectureConfig,
-    train_cfg: EstimatorTrainConfig,
+    cfg: EstimatorTrainConfig,
     spec: SystemSpec,
     key: jax.Array,
 ):
@@ -231,33 +189,12 @@ def train_estimator_ensemble(
         build_member=build_member,
     )
 
-    ensemble, _ = train_se_ensemble(
+    ensemble, _ = train_estimator(
         ensemble,
         obs,
         acts,
         trues,
-        cfg=train_cfg,
-        spec=spec,
-        key=jr.PRNGKey(train_cfg.seed),
+        cfg=cfg,
+        key=jr.PRNGKey(cfg.seed),
     )
     return ensemble
-
-def _outputs_to_loc_scale(outs: Any):
-    if hasattr(outs, "member_locs") and hasattr(outs, "member_inv_sps"):
-        loc = outs.member_locs
-        scale = jax.nn.softplus(outs.member_inv_sps -1.0) + 1e-4
-        return loc, scale
-    
-    loc, scale = est_to_loc_scale(outs)
-    return loc[:, None, :], scale[:, None, :]
-
-def normalize_single_outputs(outs: Any, burn_in: int):
-    loc, scale = est_to_loc_scale(outs)
-    loc = loc[:, burn_in:]
-    scale = scale[:, burn_in:]
-    loc = loc[:, :, None, :]
-    scale = scale[:, :, None, :]
-    return type("NormalizedEstimatorOutputs", (), {
-        "loc": loc,
-        "scale": scale,
-    })()

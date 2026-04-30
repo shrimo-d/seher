@@ -18,7 +18,7 @@ class EstimatorTrainConfig:
     steps: int = 8000
     batch_size: int = 32
     lr: float = 1e-3
-    burn_in: int = 4
+    estimate_loss_fn: Callable = None
     sample_mse_weight: float = 0.0
     param_weight: float = 10.0
     seed: int = 0
@@ -40,7 +40,6 @@ class ArchitectureConfig:
     hidden_dim: int = 32
     window_size: int = 10
     use_layernorm: bool = False
-    K: int = 3
 
 
 @dataclass

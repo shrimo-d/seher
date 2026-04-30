@@ -32,7 +32,7 @@ def softplus_inv(y: jax.Array, eps: float = 1e-8) -> jax.Array:
 
 def scale_from_inv_sps(inv_sps: jax.Array, min_scale: float = 1e-8) -> jax.Array:
     """Compute scale from inverse softplus scale."""
-    return jnp.clip(jax.nn.softplus(inv_sps), min=min_scale)
+    return jnp.clip(jax.nn.softplus(inv_sps - 1.0), min=min_scale)
 
 
 @dataclass
@@ -57,8 +57,7 @@ class StateEstimate:
 
     @property
     def scale(self) -> jax.Array:
-        return jax.nn.softplus(self.inv_softplus_scale - 1.0) + 1e-4
-
+        return scale_from_inv_sps(self.inv_softplus_scale)
 
 def sample_gaussian_estimate(est: StateEstimate, key: jax.Array) -> jax.Array:
     """Helper function for sampling an estimate from a normal"""
@@ -216,6 +215,59 @@ class StateEstimatorGRUCarry:
 
 
 @dataclass
+class StateEstimatorGRU:
+    """State estimator that uses a GRU cell to keep a hidden state and
+    outputs a deterministic state estimate.
+    
+    The inv_softplus_scale of the output StateEstimate is always -30
+    everywhere, so that sampling is basically deterministic.
+    
+    Attributes
+    ----------
+    gru:
+        GRUCell to update the hidden state.
+    head:
+        Function approximator to use.
+    obs_to_array:
+        Turn the observation that a state estimator gets into an array so that it can be
+        given to a GRUCell.
+    control_to_array:
+        Turn the control that a state estimator gets into an array so that it can be
+        given to a GRUCell.
+    hidden_dim:
+        Dimension of the hidden state.
+    state_dim:
+        Dimension of the state array.
+    
+    """
+
+    gru: GRUCell
+    head: MLP
+
+    obs_to_array: Callable = field(pytree_node=False)
+    control_to_array: Callable = field(pytree_node=False)
+    hidden_dim: int = field(pytree_node=False)
+    state_dim: int = field(pytree_node=False)
+
+    def initial_carry(self):
+        return StateEstimatorGRUCarry(h=jnp.zeros((self.hidden_dim,)))
+    
+    initial_carry.__doc__ = StateEstimator.initial_carry.__doc__
+
+    def __call__(self, carry: StateEstimatorGRUCarry, obs, control, key):
+        del key
+        o = self.obs_to_array(obs)
+        c = self.control_to_array(control)
+        x = jnp.concatenate([o, c], axis=-1)
+
+        h_new = self.gru(carry.h, x)
+        out = self.head(h_new)
+
+        est = StateEstimate(loc=out, inv_softplus_scale=jnp.full_like(out, -30.0))
+        return carry.replace(h=h_new), est
+
+
+@dataclass
 class StateEstimatorGRUGaussian:
     """State estimator that uses GRU to update hidden state and outputs
     parameters for a normal.
@@ -267,155 +319,6 @@ class StateEstimatorGRUGaussian:
         return carry.replace(h=h_new), est
 
     __call__.__doc__ = StateEstimator.__call__.__doc__
-
-
-@dataclass
-class BeliefState:
-    loc: jax.Array
-    inv_softplus_scale: jax.Array
-
-
-@dataclass
-class BeliefStateCarry:
-    orig_carry: Any  # Needs to be the original Carry but it isnt a type in seher
-    belief_state: BeliefState
-
-
-@dataclass
-class BeliefStateWrapper:
-    """Wrapper that adds the belief state to the carry, which is then
-    fed to the underlying state estimator as additional input.
-
-    Attributes
-    ----------
-    estimator:
-        Underlying state estimator. The input dimensions should match
-        obs_dim+belief_state_dim
-    belief_idx:
-        Tuple of indexes for the StateEstimate.loc and StateEstimate.inv_softplus_scale
-        arrays corresponding to the belief state.
-    """
-
-    estimator: StateEstimator
-    obs_to_array: Callable = field(pytree_node=False)
-    belief_idx: tuple[int, ...] = field(pytree_node=False)
-    use_belief_scale: bool = field(pytree_node=False, default=False)
-    belief_momentum: float = field(pytree_node=False, default=0.0)
-    detach_belief: bool = field(pytree_node=False, default=True)
-
-    def initial_carry(self):
-        se_carry = self.estimator.initial_carry()
-        n_belief = len(self.belief_idx)
-        belief_state = BeliefState(
-            loc=jnp.zeros((n_belief,)),
-            inv_softplus_scale=jnp.full((n_belief,), fill_value=-30.0),
-        )
-        return BeliefStateCarry(
-            orig_carry=se_carry,
-            belief_state=belief_state,
-        )
-
-    def __call__(self, carry: BeliefStateCarry, obs, control, key):
-        obs_array = self.obs_to_array(obs)
-        belief_loc = carry.belief_state.loc
-        belief_scale = carry.belief_state.inv_softplus_scale
-
-        if self.detach_belief:
-            belief_loc = jax.lax.stop_gradient(belief_loc)
-            belief_scale = jax.lax.stop_gradient(belief_scale)
-
-        if self.use_belief_scale:
-            belief_input = jnp.concatenate([belief_loc, belief_scale], axis=-1)
-        else:
-            belief_input = belief_loc
-
-        mod_obs = jnp.concatenate([obs_array, belief_input], axis=-1)
-
-        se_carry, est = self.estimator(carry.orig_carry, mod_obs, control, key)
-
-        idx = jnp.array(self.belief_idx)
-        new_belief_loc_raw = est.loc[idx]
-        new_belief_inv_sps_raw = est.inv_softplus_scale[idx]
-
-        if self.belief_momentum > 0.0:
-            a = self.belief_momentum
-            new_belief_loc = a * carry.belief_state.loc + (1.0 - a) * new_belief_loc_raw
-            new_belief_inv_sps = (
-                a * carry.belief_state.inv_softplus_scale
-                + (1.0 - 1) * new_belief_inv_sps_raw
-            )
-        else:
-            new_belief_loc = new_belief_loc_raw
-            new_belief_inv_sps = new_belief_inv_sps_raw
-
-        new_belief = BeliefState(
-            loc=new_belief_loc,
-            inv_softplus_scale=new_belief_inv_sps,
-        )
-
-        new_carry = carry.replace(
-            orig_carry=se_carry,
-            belief_state=new_belief,
-        )
-        return new_carry, est
-
-
-@dataclass
-class MixtureStateEstimate:
-    loc: jax.Array
-    inv_softplus_scale: jax.Array
-    logits: jax.Array
-
-
-def mixtrue_to_params(est: MixtureStateEstimate, eps: float = 1e-5):
-    weights = jax.nn.softplus(est.logits)
-    scale = jax.nn.softplus(est.inv_softplus_scale) + eps
-    return weights, est.loc, scale
-
-
-@dataclass
-class StateEstimatorGRUMixture:
-    gru: GRUCell
-    head: MLP
-
-    obs_to_array: Callable = field(pytree_node=False)
-    control_to_array: Callable = field(pytree_node=False)
-    hidden_dim: int = field(pytree_node=False)
-    state_dim: int = field(pytree_node=False)
-    n_components: int = field(pytree_node=False)
-
-    def initial_carry(self):
-        return StateEstimatorGRUCarry(h=jnp.zeros((self.hidden_dim,)))
-
-    def __call__(self, carry, obs, control, key):
-        del key
-
-        o = self.obs_to_array(obs)
-        c = self.control_to_array(control)
-        x = jnp.concatenate([o, c], axis=-1)
-
-        h_new = self.gru(carry.h, x)
-        out = self.head(h_new)
-
-        K = self.n_components
-        D = self.state_dim
-
-        idx = 0
-        loc = out[idx : idx + K * D].reshape(K, D)
-        idx += K * D
-
-        inv_sps = out[idx : idx + K * D].reshape(K, D)
-        idx += K * D
-
-        logits = out[idx : idx + K * D]
-
-        est = MixtureStateEstimate(
-            loc=loc,
-            inv_softplus_scale=inv_sps,
-            logits=logits,
-        )
-
-        return carry.replace(h=h_new), est
 
 
 @dataclass
@@ -691,6 +594,12 @@ class StateEstimatorMDP:
         Dimension of latent representation.
     penalty_fn:
         Callable that computes a penalty term for the cost.
+    concatenate_obs_est:
+        Whether the estimator output should be concatenate to the observation. If True,
+        you need to supply obs_to_array as well.
+    obs_to_array:
+        Callable that turns observation into array for concatenation if concatenate_obs_est
+        is True.
 
     """
 
@@ -700,6 +609,14 @@ class StateEstimatorMDP:
     penalty_fn: Callable[[Any], jax.Array] = field(
         pytree_node=False,
         default=lambda est: jnp.array(0.0),
+    )
+    concatenate_obs_est: bool = field(
+        pytree_node=False,
+        default=False,
+    )
+    obs_to_array: Callable = field(
+        pytree_node=False,
+        default=None,
     )
 
     @property
@@ -731,6 +648,8 @@ class StateEstimatorMDP:
         se_carry1, est0 = self.estimator(se_carry0, obs0, prev_control0, k1)
         z0 = self.adapter(est0, k2)
 
+        z0 = self._maybe_concatenate(obs0, z0)
+
         return StateEstimatorMDPState(
             obs=obs0,
             latent=z0,
@@ -745,9 +664,25 @@ class StateEstimatorMDP:
         se_carry1, est1 = self.estimator(state.se_carry, obs1, control, k1)
         z1 = self.adapter(est1, k2)
 
+        z1 = self._maybe_concatenate(obs1, z1)
+
         return StateEstimatorMDPState(
             obs=obs1,
             latent=z1,
             est=est1,
             se_carry=se_carry1,
         )
+    
+    def _maybe_concatenate(self, obs, est_out):
+        """Returns a concatenation of the observation with the latent estimator output
+        (After the adapter).
+        
+        """
+
+        if self.concatenate_obs_est:
+            if self.obs_to_array is None:
+                raise ValueError("obs_to_array must be supplied when concatenate_obs_est=True")
+            
+            obs_arr = self.obs_to_array(obs)
+            return jnp.concatenate([obs_arr, est_out], axis=-1)
+        return est_out

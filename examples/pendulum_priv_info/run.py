@@ -65,10 +65,12 @@ from plot_helpers import (
     att_from_est,
 )
 from estimator_training import (
-    se_forward_sequence,
-    train_se,
+    train_estimator,
     train_estimator_ensemble,
-    normalize_single_outputs,
+    mse_loss_ensemble_members,
+    mse_loss_single,
+    nll_loss_ensemble_members,
+    nll_loss_single,
 )
 from se_helpers import (
     pendulum_obs_to_array,
@@ -205,182 +207,12 @@ def extract_arrays(histories, true_to_array: Callable[[Any], jax.Array]):
 # -----------------------------------------------------------------------------
 
 
-def evaluate_estimator_supervised(
-    se, obs, act, true, burn_in: int, spec: SystemSpec, seed: int = 0
-) -> dict[str, float]:
-    keys = jr.split(jr.PRNGKey(seed), true.shape[0])
-    outs = jax.vmap(
-        lambda oseq, aseq, k: se_forward_sequence(se, oseq, aseq, k), in_axes=(0, 0, 0)
-    )(obs, act, keys)
-    norm_out = normalize_single_outputs(outs, burn_in=burn_in)
-    loc = norm_out.loc
-    scale = norm_out.scale
-    true = true[:, burn_in:]
-
-    loc_mean = jnp.mean(loc, axis=2)
-    scale_mean = jnp.mean(scale, axis=2)
-
-    true_a = to_angle_augmented(true)
-    pred_a = jax.vmap(jax.vmap(to_angle_augmented))(loc_mean)
-
-    dyn_idx = jnp.array(spec.dynamic_indices_aug)
-    par_idx = jnp.array(spec.parameter_indices_aug)
-
-    state_true = jnp.take(true_a, dyn_idx, axis=-1)
-    state_pred = jnp.take(pred_a, dyn_idx, axis=-1)
-    param_true = jnp.take(true_a, par_idx, axis=-1)
-    param_pred = jnp.take(pred_a, par_idx, axis=-1)
-
-    mse = jnp.mean((pred_a - true_a) ** 2)
-    param_mse = jnp.mean((param_pred - param_true) ** 2)
-    state_mse = jnp.mean((state_pred - state_true) ** 2)
-
-    metrics = {
-        "mse": float(mse),
-        "param_mse": float(param_mse),
-        "state_mse": float(state_mse),
-        "mean_scale": float(jnp.mean(scale_mean)),
-    }
-    if loc.shape[2] > 1:
-        member_disagreement = jnp.mean(jnp.var(loc, axis=2))
-        metrics["member_disagreement"] = float(member_disagreement)
-    return metrics
-
-
 def evaluate_policy_mean_cost(policy, mdp, rl_cfg: RLConfig, key: jax.Array) -> float:
     keys = jr.split(key, rl_cfg.eval_rollouts)
     history = jax.vmap(
         lambda k: simulate(mdp=mdp, policy=policy, n_steps=rl_cfg.eval_steps, key=k)
     )(keys)
     return float(history.costs.mean())
-
-
-# -----------------------------------------------------------------------------
-# Optuna
-# -----------------------------------------------------------------------------
-
-
-def suggest_architecture(trial) -> ArchitectureConfig:
-    n_hidden_layers = trial.suggest_int("n_hidden_layers", 1, 3)
-    width = trial.suggest_categorical("width", [16, 32, 64, 128])
-    hidden_sizes = tuple(width for _ in range(n_hidden_layers))
-    hidden_dim = trial.suggest_categorical("hidden_dim", [16, 32, 64, 128])
-    window_size = trial.suggest_int("window_size", 3, 8)
-    use_layernorm = trial.suggest_categorical("use_layernorm", [False, True])
-    return ArchitectureConfig(
-        hidden_sizes=hidden_sizes,
-        hidden_dim=hidden_dim,
-        window_size=window_size,
-        use_layernorm=use_layernorm,
-    )
-
-
-def optuna_objective(
-    family: str,
-    obs_train,
-    act_train,
-    true_train,
-    obs_val,
-    act_val,
-    true_val,
-    train_cfg: EstimatorTrainConfig,
-    spec: SystemSpec,
-    search_cfg: SearchConfig,
-):
-    def objective(trial):
-        arch = suggest_architecture(trial)
-        key = jr.PRNGKey(search_cfg.seed + trial.number)
-        estimator = ESTIMATOR_BUILDERS[family](key, arch, spec)
-        local_train_cfg = EstimatorTrainConfig(**asdict(train_cfg))
-        local_train_cfg.steps = search_cfg.estimator_steps
-        estimator, _ = train_se(
-            estimator,
-            obs_train,
-            act_train,
-            true_train,
-            local_train_cfg,
-            spec=spec,
-            key=key,
-        )
-        metrics = evaluate_estimator_supervised(
-            estimator,
-            obs_val,
-            act_val,
-            true_val,
-            burn_in=local_train_cfg.burn_in,
-            spec=spec,
-            seed=trial.number,
-        )
-        trial.set_user_attr("metrics", metrics)
-        trial.set_user_attr("arch", asdict(arch))
-        if search_cfg.metric == "param_mse":
-            return metrics["param_mse"]
-        if search_cfg.metric == "state_mse":
-            return metrics["state_mse"]
-        return 0.7 * metrics["param_mse"] + 0.3 * metrics["state_mse"]
-
-    return objective
-
-
-def run_architecture_search(
-    cfg: ExperimentConfig,
-    obs,
-    acts,
-    trues,
-    run_dir: Path,
-    spec: SystemSpec,
-) -> dict[str, ArchitectureConfig]:
-    if optuna is None:
-        raise RuntimeError(
-            "Optuna is not installed, but search.enabled=True was requested."
-        )
-
-    n = trues.shape[0]
-    n_train = int(0.8 * n)
-    obs_train, obs_val = tree_take(obs, jnp.arange(n_train)), tree_take(
-        obs, jnp.arange(n_train, n)
-    )
-    act_train, act_val = tree_take(acts, jnp.arange(n_train)), tree_take(
-        acts, jnp.arange(n_train, n)
-    )
-    true_train, true_val = trues[:n_train], trues[n_train:]
-
-    best_arches: dict[str, ArchitectureConfig] = {}
-    raw_results: dict[str, Any] = {}
-
-    for family in cfg.estimator_families:
-        print(f"\n=== Optuna search for {family} ===")
-        study = optuna.create_study(
-            direction="minimize",
-            sampler=optuna.samplers.TPESampler(seed=cfg.search.seed),
-        )
-        study.optimize(
-            optuna_objective(
-                family,
-                obs_train,
-                act_train,
-                true_train,
-                obs_val,
-                act_val,
-                true_val,
-                cfg.se_train,
-                spec,
-                cfg.search,
-            ),
-            n_trials=cfg.search.trials,
-        )
-        best_trial = study.best_trial
-        best_arch = ArchitectureConfig(**best_trial.user_attrs["arch"])
-        best_arches[family] = best_arch
-        raw_results[family] = {
-            "best_value": best_trial.value,
-            "best_params": best_trial.params,
-            "best_arch": best_trial.user_attrs["arch"],
-            "metrics": best_trial.user_attrs.get("metrics", {}),
-        }
-
-    save_json(run_dir / "artifacts" / cfg.search.save_filename, raw_results)
-    return best_arches
 
 
 # -----------------------------------------------------------------------------
@@ -412,13 +244,13 @@ def train_family_estimator(
             trues=trues,
             n_members=cfg.n_ensemble_members,
             arch=arch,
-            train_cfg=cfg.se_train,
+            cfg=cfg.se_train,
             spec=spec,
             key=key,
         )
     else:
         estimator = ESTIMATOR_BUILDERS[family](key, arch, spec)
-        estimator, _ = train_se(
+        estimator, _ = train_estimator(
             estimator, obs, acts, trues, cfg=cfg.se_train, spec=spec, key=key
         )
 
@@ -430,7 +262,7 @@ def train_family_estimator(
 
 def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     run_dir = ensure_run_dir(cfg)
-    save_json(run_dir / "config.json", asdict(cfg))
+    #save_json(run_dir / "config.json", asdict(cfg))
 
     t0 = time.time()
     spec = get_system_spec(cfg)
@@ -448,8 +280,6 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     obs, acts, trues = extract_arrays(histories, spec.true_to_array)
 
     arch_per_family = {family: cfg.arch for family in cfg.estimator_families}
-    if cfg.search.enabled:
-        arch_per_family = run_architecture_search(cfg, obs, acts, trues, run_dir, spec)
 
     metrics: dict[str, Any] = {"oracle": {}}
     trained_estimators: dict[str, Any] = {}
@@ -497,23 +327,6 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         )
         estimator = jax.lax.stop_gradient(estimator)
         trained_estimators[family] = estimator
-
-        # Try supervised metrics. For ensembles this may fail if the ensemble returns a
-        # different structure during vmapped sequence inference. Keep it best-effort.
-        try:
-            eval_idx = jnp.arange(min(128, trues.shape[0]))
-            metrics[family] = {
-                "supervised": evaluate_estimator_supervised(
-                    estimator,
-                    tree_take(obs, eval_idx),
-                    tree_take(acts, eval_idx),
-                    trues[eval_idx],
-                    burn_in=cfg.se_train.burn_in,
-                    spec=spec,
-                )
-            }
-        except Exception as exc:
-            metrics[family] = {"supervised_error": repr(exc)}
 
         modes = cfg.penalty_modes if cfg.use_ensemble else ("none",)
         wrapped_mdps[family] = {}
@@ -609,7 +422,7 @@ if __name__ == "__main__":
         system_name="po_pendulum",
         min_mass=0.9,
         max_mass=1.1,
-        estimator_families=("sto_mlp", "sto_gru"),
+        estimator_families=("det_gru",),
         use_ensemble=True,
         n_ensemble_members=5,
         penalty_modes=("none",),  # , "aleatoric", "epistemic", "both"),
@@ -617,18 +430,18 @@ if __name__ == "__main__":
         search=SearchConfig(enabled=False, trials=10, metric="param_mse"),
         checkpoint=CheckpointConfig(
             save_estimators=False,
-            save_policies=False,
+            save_policies=True,
         ),
         data=DataConfig(
             policy_source="random-policy",
-            n_traj=70000,
-            n_steps=2000,
+            n_traj=15000,
+            n_steps=100,
         ),
         rl=RLConfig(
             episode_length=100,
             steps_per_update=25,
             n_simulations=32,
-            max_updates=32000,
+            max_updates=64000,
         ),
         ud=UDPConfig(
             n_control=1,
@@ -636,16 +449,16 @@ if __name__ == "__main__":
             max_control_coeff=1.0,
         ),
         se_train=EstimatorTrainConfig(
-            steps=6000,
+            steps=50000,
             batch_size=64,
             lr=1e-3,
-            burn_in=0,
+            estimate_loss_fn=mse_loss_ensemble_members, #NEED TO CHANGE THIS TO THE THING YOU WANT!!!!!
             sample_mse_weight=0,
             param_weight=3,
         ),
         arch=ArchitectureConfig(
-            hidden_sizes=[32, 32],
-            hidden_dim=16,
+            hidden_sizes=[128, 64],
+            hidden_dim=64,
             window_size=15,
             use_layernorm=False,
         ),

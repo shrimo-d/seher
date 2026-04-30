@@ -41,7 +41,7 @@ def build_state_estimator_mdp(mdp, estimator, spec: SystemSpec, use_ensemble: bo
         kwargs = {
             "original_mdp": mdp,
             "estimator": estimator,
-            "adapter": SampleMeanGaussianLatent(latent_dim=spec.state_dim),
+            "adapter": MeanEnsembleLatent(latent_dim=spec.state_dim),
         }
         if mode != "none":
             # This follows the user's newer script API.
@@ -49,7 +49,7 @@ def build_state_estimator_mdp(mdp, estimator, spec: SystemSpec, use_ensemble: bo
         return StateEstimatorMDP(**kwargs)
 
     # Single-estimator setup (older script style)
-    adapter = SampleLatent(latent_dim=spec.state_dim)
+    adapter = MeanLatent(latent_dim=spec.state_dim)
     return StateEstimatorMDP(original_mdp=mdp, estimator=estimator, adapter=adapter)
 
 
