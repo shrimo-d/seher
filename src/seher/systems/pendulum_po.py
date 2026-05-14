@@ -136,4 +136,4 @@ class PartiallyObservablePendulum:
         return result
     
     def empty_control(self) -> jax.Array:
-        return jnp.empty((1,))
+        return jnp.zeros((1,))

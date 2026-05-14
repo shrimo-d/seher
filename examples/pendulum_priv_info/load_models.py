@@ -1,6 +1,7 @@
 from typing import Any
 import json
 from pathlib import Path
+import jax
 from seher.apx_util import (
     load_model,
     save_model,
@@ -11,6 +12,7 @@ from seher.apx_util import (
 )
 from seher.apx_arch import StaticMLPPolicy
 from se_helpers import (
+    NormalizedStateEstimatorGRU,
     NormalizedStateEstimatorGRUGaussian,
     NormalizedStateEstimatorMLP,
     NormalizedStateEstimatorMLPGaussian,
@@ -18,8 +20,10 @@ from se_helpers import (
     CONTROL_REGISTRY,
     ESTIMATOR_OBS_REGISTRY,
     ESTIMATOR_CONTROL_REGISTRY,
-
 )
+from seher.models.state_estimator import StateEstimatorEnsemble
+from seher.jax_util import tree_stack
+
 from naming_helpers import estimator_ckpt_dir
 
 def get_policy_metadata(policy: StaticMLPPolicy, obs_adapter_name: str, control_adapter_name: str = "identity") -> dict[str, Any]:
@@ -88,6 +92,30 @@ def sto_mlp_estimator_from_metadata(metadata: dict[str, Any]) -> NormalizedState
         state_dim=metadata["state_dim"],
     )
 
+def get_det_gru_estimator_metadata(est: NormalizedStateEstimatorGRU) -> dict[str, Any]:
+    return {
+        "kind": "NormalizedStateEstimatorGRU",
+        "gru": get_gru_metadata(est.gru),
+        "head": get_mlp_metadata(est.head),
+        "obs_to_array": "pendulum_obs_to_array",
+        "control_to_array": "identity",
+        "hidden_dim": est.hidden_dim,
+        "state_dim": est.state_dim,
+    }
+
+def det_gru_estimator_from_metadata(metadata: dict[str, Any]) -> NormalizedStateEstimatorGRU:
+    if metadata["kind"] != "NormalizedStateEstimatorGRU":
+        raise ValueError(f"Expected NormalizedStateEstimatorGRU metadata, got {metadata["kind"]}!")
+    
+    return NormalizedStateEstimatorGRU(
+        gru=gru_from_metadata(metadata["gru"]),
+        head=mlp_from_metadata(metadata["head"]),
+        obs_to_array=ESTIMATOR_OBS_REGISTRY[metadata["obs_to_array"]],
+        control_to_array=CONTROL_REGISTRY[metadata["control_to_array"]],
+        hidden_dim=metadata["hidden_dim"],
+        state_dim=metadata["state_dim"],
+    )
+
 def get_sto_gru_estimator_metadata(est: NormalizedStateEstimatorGRUGaussian) -> dict[str, Any]:
     return {
         "kind": "NormalizedStateEstimatorGRUGaussian",
@@ -113,11 +141,40 @@ def sto_gru_estimator_from_metadata(metadata: dict[str, Any]) -> NormalizedState
         state_dim=metadata["state_dim"],
     )
 
+def get_ensemble_estimator_metadata(est: StateEstimatorEnsemble, family: str) -> dict[str, Any]:
+    member0 = jax.tree_util.tree_map(lambda x: x[0], est.estimators)
+    return {
+        "kind": "StateEstimatorEnsemble",
+        "n_members": est.n_members,
+        "member_family": family.replace("_ensemble", ""),
+        "member": get_estimator_metadata(family.replace("_ensemble", ""), member0),
+    }
+
+def ensemble_estimator_from_metadata(metadata: dict[str, Any]) -> StateEstimatorEnsemble:
+    if metadata["kind"] != "StateEstimatorEnsemble":
+        raise ValueError(f"Expected StateEstimatorEnsemble metadata, got {metadata["kind"]}!")
+    n = metadata["n_members"]
+    member_skeleton = estimator_from_metadata(metadata["member"])
+
+    members = [member_skeleton for _ in range(n)]
+    carries = [member_skeleton.initial_carry() for _ in range(n)]
+
+    return StateEstimatorEnsemble(
+        estimators=tree_stack(members),
+        initial_carry_template=tree_stack(carries),
+        n_members=n,
+    )
+
 def get_estimator_metadata(family: str, estimator: Any) -> dict[str, Any]:
+    if family.endswith("_ensemble"):
+        return get_ensemble_estimator_metadata(estimator, family)
+    
     if family == "det_mlp":
         return get_det_mlp_estimator_metadata(estimator)
     if family == "sto_mlp":
         return get_sto_mlp_estimator_metadata(estimator)
+    if family == "det_gru":
+        return get_det_gru_estimator_metadata(estimator)
     if family == "sto_gru":
         return get_sto_gru_estimator_metadata(estimator)
     raise ValueError(f"Unknown estimator family: {family}")
@@ -125,10 +182,14 @@ def get_estimator_metadata(family: str, estimator: Any) -> dict[str, Any]:
 
 def estimator_from_metadata(metadata: dict[str, Any]) -> Any:
     kind = metadata["kind"]
+    if kind == "StateEstimatorEnsemble":
+        return ensemble_estimator_from_metadata(metadata)
     if kind == "NormalizedStateEstimatorMLP":
         return det_mlp_estimator_from_metadata(metadata)
     if kind == "NormalizedStateEstimatorMLPGaussian":
         return sto_mlp_estimator_from_metadata(metadata)
+    if kind == "NormalizedStateEstimatorGRU":
+        return det_gru_estimator_from_metadata(metadata)
     if kind == "NormalizedStateEstimatorGRUGaussian":
         return sto_gru_estimator_from_metadata(metadata)
     raise ValueError(f"Unknown estimator metadata kind: {kind}")

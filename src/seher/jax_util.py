@@ -1,7 +1,7 @@
 """Module holding various jax-specific utils."""
 
 from dataclasses import is_dataclass
-from typing import List, TypeVar
+from typing import List, TypeVar, Any
 
 import jax
 import jax.numpy as jnp
@@ -101,3 +101,7 @@ def tree_stack(pytrees: List[PyTree]) -> PyTree:
 
     # Reconstruct with the original tree definition
     return jax.tree_util.tree_unflatten(treedef, stacked_leaves)
+
+def tree_take(pytree: PyTree, idx: jax.Array) -> Any:
+    """Selects object in a PyTree at the given index."""
+    return jax.tree_util.tree_map(lambda x: x[idx], pytree)

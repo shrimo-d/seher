@@ -547,7 +547,7 @@ class SampleMeanGaussianLatent:
     min_scale: float = field(pytree_node=False, default=1e-4)
 
     def __call__(self, est, key):
-        scale = jnp.clip(jax.nn.softplus(est.scale), a_min=self.min_scale)
+        scale = jnp.clip(est.scale, a_min=self.min_scale)
         eps = jr.normal(key, shape=est.loc.shape)
         z = est.loc + scale * eps
         return jnp.asarray(z).reshape((self.latent_dim,))

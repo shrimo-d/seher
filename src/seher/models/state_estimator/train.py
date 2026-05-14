@@ -1,36 +1,18 @@
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+
 import optax
-from typing import Any, Optional, Callable
-from flax.struct import dataclass
+from typing import Callable
 
-from seher.models.state_estimator import StateEstimatorEnsemble, scale_from_inv_sps
+from seher.jax_util import tree_take
+from seher.types import JaxRandomKey
 
-from configs import (
-    EstimatorTrainConfig,
-    SystemSpec,
-    ArchitectureConfig,
-)
-from se_helpers import (
+from .estimator import scale_from_inv_sps
+from .util import (
     est_to_loc_scale,
     gaussian_nll,
-    tree_take,
-    ESTIMATOR_BUILDERS,
 )
-
-def se_forward_sequence(se, obs_seq, act_seq, key):
-    carry0 = se.initial_carry()
-
-    def step(se_carry, xs):
-        obs_t, act_t, key_t = xs
-        se_carry, est_out = se(se_carry, obs_t, act_t, key_t)
-        return se_carry, est_out
-
-    t_len = jax.tree_util.tree_leaves(obs_seq)[0].shape[0]
-    keys = jr.split(key, t_len)
-    _, preds = jax.lax.scan(step, carry0, (obs_seq, act_seq, keys))
-    return preds
 
 
 def mse_loss_single(est_out, true_t):
@@ -73,7 +55,6 @@ def nll_regularized_ensemble_members(est_out, true_t):
     nll = nll_loss_ensemble_members(est_out, true_t)
     regularize_term = jnp.mean(jnp.log(jax.nn.softplus(est_out.member_inv_sps) + 1e-8) ** 2)
     return nll + 0.3 * regularize_term
-
 
 
 def _trajectory_loss(se, obs_seq, act_seq, true_seq, key, estimate_loss_fn):
@@ -143,71 +124,71 @@ def make_generic_se_trainer(
 def train_estimator(
     model,
     obs,
-    act,
-    true,
-    cfg: EstimatorTrainConfig,
-    steps_override: Optional[int] = None,
-    key: Optional[jax.Array] = None,
+    control,
+    true: jax.Array,
+    loss_fn: Callable,
+    batch_size: int,
+    n_iterations: int,
+    lr: float,
+    key: JaxRandomKey,
+    verbose: bool = False,
 ):
-    if key is None:
-        key = jr.PRNGKey(cfg.seed)
-    if cfg.estimate_loss_fn is None:
-        raise ValueError("cfg.estimate_loss_fn cannot be None")
-
-    steps = cfg.steps if steps_override is None else steps_override
+    """Supervised training of a StateEstimator(Ensemble).
+    
+    Attributes
+    ----------
+    model:
+        StateEstimator object (can be an ensemble).
+    obs:
+        Observation object the model expects.
+    control:
+        Control object the model expects.
+    true:
+        Targets for supervised learning. Needs to be jax.Array.
+    loss_fn:
+        Callable which computes the loss.
+    batch_size:
+        Number of elements for each train iteration.
+    n_iterations:
+        Number of iterations for training.
+    lr:
+        Learning rate.
+    key:
+        JaxRandomKey for downstream randomness.
+    verbose:
+        Whether or not the loss should be printed each 100 iterations.
+    
+    Returns
+    -------
+    model:
+        The trained StateEstimator
+    losses:
+        List of losses after the first, each 100th and last iteration.
+    """
 
     step_fn, opt_state = make_generic_se_trainer(
         model,
-        lr=cfg.lr,
-        estimate_loss_fn=cfg.estimate_loss_fn,
+        lr=lr,
+        estimate_loss_fn=loss_fn,
     )
 
     n = true.shape[0]
     losses: list[float] = []
 
-    for i in range(steps):
+    for i in range(n_iterations):
         key, k_idx, k_step = jr.split(key, 3)
-        idx = jr.choice(k_idx, n, shape=(cfg.batch_size,), replace=False)
+        idx = jr.choice(k_idx, n, shape=(batch_size,), replace=False)
 
         obs_b = tree_take(obs, idx)
-        act_b = tree_take(act, idx)
+        act_b = tree_take(control, idx)
         true_b = true[idx]
 
         model, opt_state, loss = step_fn(model, opt_state, obs_b, act_b, true_b, k_step)
 
-        if i % 100 == 0 or i == steps - 1:
+        if i % 100 == 0 or i == n_iterations - 1:
             val = float(loss)
             losses.append(val)
-            print(f"se step {i:5d} loss {val:.6f}")
+            if verbose:
+                print(f"se step {i:5d} loss {val:.6f}")
 
     return model, losses
-
-
-def train_estimator_ensemble(
-    family: str,
-    obs,
-    acts,
-    trues,
-    n_members: int,
-    arch: ArchitectureConfig,
-    cfg: EstimatorTrainConfig,
-    spec: SystemSpec,
-    key: jax.Array,
-):
-    build_member = lambda k: ESTIMATOR_BUILDERS[family](k, arch, spec)
-
-    ensemble = StateEstimatorEnsemble.create(
-        n_members=n_members,
-        key=key,
-        build_member=build_member,
-    )
-
-    ensemble, _ = train_estimator(
-        ensemble,
-        obs,
-        acts,
-        trues,
-        cfg=cfg,
-        key=jr.PRNGKey(cfg.seed),
-    )
-    return ensemble

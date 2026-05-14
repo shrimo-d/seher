@@ -53,31 +53,6 @@ def to_angle_augmented(x: jax.Array) -> jax.Array:
     return jnp.concatenate([angle, rest], axis=-1)
 
 
-def est_to_loc_scale(
-    est_out: Any, min_scale: float = 1e-8
-) -> tuple[jax.Array, jax.Array]:
-    if hasattr(est_out, "loc") and hasattr(est_out, "scale"):
-        loc = est_out.loc
-        is_det = jnp.any(est_out.inv_softplus_scale < -25)
-        scale = jax.lax.cond(
-            is_det,
-            lambda est_: jnp.zeros_like(est_.loc),
-            lambda est_: jnp.clip(est_.scale, min=min_scale),
-            operand=est_out,
-        )
-        return loc, scale
-    return est_out, jnp.zeros_like(est_out)
-
-
-def gaussian_nll(y: jax.Array, loc: jax.Array, scale: jax.Array) -> jax.Array:
-    var = scale**2
-    return 0.5 * (((y - loc) ** 2) / (var + 1e-8) + 2.0 * jnp.log(scale + 1e-8))
-
-
-def tree_take(pytree: Any, idx: jax.Array) -> Any:
-    return jax.tree_util.tree_map(lambda x: x[idx], pytree)
-
-
 def tree_slice_time(pytree: Any, burn_in: int) -> Any:
     return jax.tree_util.tree_map(lambda x: x[:, burn_in:], pytree)
 

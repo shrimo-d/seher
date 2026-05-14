@@ -18,6 +18,7 @@ wheels/
 *.msgpack
 runs/
 examples/pendulum_priv_info/policies
+examples/pendulum_priv_info/artifacts
 
 # Mac files
 .DS_Store

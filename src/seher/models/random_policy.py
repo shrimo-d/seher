@@ -8,8 +8,6 @@ from seher.types import MDP
 @dataclass
 class RandomPolicy:
     mdp: MDP
-    z: float = field(pytree_node=False, default=0)
-    sigma: float = field(pytree_node=False, default=0.2)
 
     def __call__(self, carry, obs, control, key):
         final = jr.uniform(
@@ -18,7 +16,6 @@ class RandomPolicy:
             minval=self.mdp.control_min,
             maxval=self.mdp.control_max,
         )
-        self.replace(z=final)
         return None, final
 
     def initial_carry(self):
@@ -58,3 +55,18 @@ class BangBangHoldPolicy:
             "u": u,
         }
         return new_carry, u
+
+@dataclass
+class RandomWalkPolicy:
+    mdp: MDP
+    z: float = field(pytree_node=False, default=0)
+    sigma: float = field(pytree_node=False, default=0.2)
+
+    def __call__(self, carry, obs, control, key):
+        noise = jr.normal(key, shape=control.shape)
+        final = self.z + self.sigma * noise
+        self.replace(z=final)
+        return None, final
+    
+    def initial_carry(self):
+        return None
