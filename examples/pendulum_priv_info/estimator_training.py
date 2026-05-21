@@ -6,18 +6,15 @@ from typing import Any, Optional, Callable
 from flax.struct import dataclass
 
 from seher.models.state_estimator import StateEstimatorEnsemble, scale_from_inv_sps
+from seher.models.state_estimator.util import est_to_loc_scale, gaussian_nll
+from seher.jax_util import tree_take
 
 from configs import (
     EstimatorTrainConfig,
     SystemSpec,
     ArchitectureConfig,
 )
-from se_helpers import (
-    est_to_loc_scale,
-    gaussian_nll,
-    tree_take,
-    ESTIMATOR_BUILDERS,
-)
+from se_helpers import ESTIMATOR_BUILDERS
 
 def se_forward_sequence(se, obs_seq, act_seq, key):
     carry0 = se.initial_carry()

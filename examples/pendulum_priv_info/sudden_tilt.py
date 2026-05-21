@@ -402,7 +402,7 @@ colors = {
 # MASS ESTIMATES
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(10, 5))
+fig, ax = plt.subplots(figsize=(12, 5))
 
 ax.axhline(
     mass,
@@ -438,7 +438,9 @@ ax.axvline(
     label="sudden tilt",
     alpha=0.3
 )
-
+ax.grid(visible=True, alpha=0.2)
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
 ax.set_title("Mass estimates after sudden tilt")
 ax.legend()
 
@@ -449,7 +451,7 @@ plt.show()
 # ANGLES
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(10, 5))
+fig, ax = plt.subplots(figsize=(12, 5))
 
 for name, out in results.items():
 
@@ -470,7 +472,9 @@ ax.axvline(
     label="sudden tilt",
     alpha=0.3
 )
-
+ax.grid(visible=True, alpha=0.2)
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
 ax.set_title("Pendulum angle")
 ax.legend()
 
@@ -481,7 +485,7 @@ plt.show()
 # CONTROLS
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(10, 5))
+fig, ax = plt.subplots(figsize=(12, 5))
 
 for name, out in results.items():
 
@@ -505,6 +509,9 @@ ax.axvline(
 )
 
 ax.set_title("Controls")
+ax.grid(visible=True, alpha=0.2)
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
 ax.legend()
 
 plt.show()
@@ -514,7 +521,7 @@ plt.show()
 # COSTS
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(10, 5))
+fig, ax = plt.subplots(figsize=(12, 5))
 
 for name, out in results.items():
 
@@ -534,6 +541,9 @@ ax.axvline(
 )
 
 ax.set_title("Costs")
+ax.grid(visible=True, alpha=0.2)
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
 ax.legend()
 
 plt.show()

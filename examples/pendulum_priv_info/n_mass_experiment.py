@@ -176,7 +176,7 @@ def eval_on_split(se, obs, act, true, key):
 def plot_mass_examples(axs, pred_mass, true_mass, title):
     n_plot = min(len(axs), pred_mass.shape[0])
     for i in range(n_plot):
-        axs[i].plot(true_mass[i], label="true mass")
+        axs[i].plot(true_mass[i], label="true mass", linestyle="--")
         axs[i].plot(pred_mass[i], label="pred mass", color="orange")
         # axs[i].set_title(f"{title} traj {i}")
         axs[i].set_ylim(0.4, 2.1)
@@ -424,18 +424,33 @@ def main(settings):
     for i, traj in enumerate(eval_true):
         angles = jnp.arctan2(traj[:, 1], traj[:, 0])
         render(angles, axs[i, 1])
+        axs[i,0].spines["top"].set_visible(False)
+        axs[i,0].spines["right"].set_visible(False)
+        axs[i,0].grid(visible=True, alpha=0.2)
     fig.suptitle("Performance on longer trajectories")
     plt.tight_layout()
     plt.show()
 
 
     #Plot error over time
+    mass_mean = eval_loc[..., 3]
+    mass_std = eval_preds.epistemic_std[..., 3]
+    mass_true = eval_true[..., 3]
+    eps = jr.normal(jr.PRNGKey(2000), shape=(100, *mass_mean.shape))
+    mass_samples = mass_mean[None, ...] + mass_std[None, ...] * eps
+
+    mae_samples = jnp.abs(mass_samples - mass_true[None, ...])
+    mae = mae_samples.mean(axis=0)
+
     fig, axs = plt.subplots(10, 1, figsize=(10,10), sharex=True)
     for i in range(10):
-        axs[i].plot(jnp.arange(settings.long_traj_len), jnp.abs(eval_loc[..., 3][i] - eval_true[..., 3][i]))
+        axs[i].plot(jnp.arange(settings.long_traj_len), mae[i])
         axs[i].set_title(f"Mass: {eval_true[..., 3][i,0]}")
-        axs[i].set_ylim(0, 0.15)
-    fig.suptitle("MAE over time")
+        axs[i].set_ylim(0, 0.3)
+        axs[i].spines["top"].set_visible(False)
+        axs[i].spines["right"].set_visible(False)
+        axs[i].grid(visible=True, alpha=0.2)
+    fig.suptitle("MAE of 100 samples over time")
     plt.tight_layout()
     plt.show()
 
@@ -446,6 +461,9 @@ def main(settings):
         axs[i].plot(jnp.arange(settings.long_traj_len), eval_preds.epistemic_std[..., 3][i], label="epistemic")
         axs[i].set_title(f"Mass: {eval_true[..., 3][i,0]}")
         axs[i].set_ylim(0, 0.31)
+        axs[i].spines["top"].set_visible(False)
+        axs[i].spines["right"].set_visible(False)
+        axs[i].grid(visible=True, alpha=0.2)
     fig.suptitle("Epistemic Uncertainty over time")
     plt.tight_layout()
     plt.show()

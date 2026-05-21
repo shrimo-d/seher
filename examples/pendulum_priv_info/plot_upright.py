@@ -45,7 +45,7 @@ zero_pol = ZeroPolicy(mdp=mdp)
 zero_traj = collect_se_dataset(mdp, zero_pol, 10, 250, key=jr.PRNGKey(23))
 obs, act, true = extract_arrays(zero_traj, oracle_obs_to_array)
 
-gru = maybe_load_estimator(Path("./examples/pendulum_priv_info"), "sto_gru_ensemble")
+gru = maybe_load_estimator(Path("./examples/pendulum_priv_info"), "det_gru_ensemble")
 
 preds, loc, scale, mse, mass_mse = (
     eval_on_split(gru, obs, act, true, jr.PRNGKey(32))
@@ -58,14 +58,9 @@ plot_epistemic_uncertainty(axs[:, 0], preds.epistemic_std[..., 3], loc[..., 3])
 for i, traj in enumerate(true):
     angles = jnp.arctan2(traj[:, 1], traj[:, 0])
     render(angles, axs[i, 1])
+    axs[i, 0].spines["top"].set_visible(False)
+    axs[i, 0].spines["right"].set_visible(False)
+fig.suptitle("State Estimates with perfectly stable Pendulum")
 plt.tight_layout()
 plt.show()
-#Aleatoric STD
-fig, axs = plt.subplots(10, 2, figsize=(12, 10), sharex=False)
-plot_mass_examples(axs[:, 0], loc[..., 3], true[..., 3], "upright")
-plot_epistemic_uncertainty(axs[:, 0], preds.aleatoric_std[..., 3], loc[..., 3])
-for i, traj in enumerate(true):
-    angles = jnp.arctan2(traj[:, 1], traj[:, 0])
-    render(angles, axs[i, 1])
-plt.tight_layout()
-plt.show()
+

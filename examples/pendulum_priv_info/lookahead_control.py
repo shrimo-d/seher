@@ -29,7 +29,7 @@ from matplotlib.gridspec import GridSpecFromSubplotSpec
 
 #VARIABLES
 
-mass = 0.8 # For single plot
+mass = 2.5 # For single plot
 masses = [0.5, 0.6875, 0.875, 1.0625, 1.25, 1.4375, 1.625, 2.0]
 n_steps = 200
 epistemic_penalty = 15.0
