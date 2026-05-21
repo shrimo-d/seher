@@ -287,7 +287,7 @@ def main(settings):
                 )
         else:
             if settings.deterministic:
-                gru = build_det_gru_estimator(jr.PRNGKey, arch, spec)
+                gru = build_det_gru_estimator(jr.PRNGKey(777), arch, spec)
             else:
                 gru = build_sto_gru_estimator(jr.PRNGKey(777), arch, spec)
         #Train estimator
