@@ -19,6 +19,7 @@ wheels/
 runs/
 examples/pendulum_priv_info/policies
 examples/pendulum_priv_info/artifacts
+*.json
 
 # Mac files
 .DS_Store

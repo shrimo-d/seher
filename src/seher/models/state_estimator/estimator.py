@@ -619,6 +619,9 @@ class StateEstimatorMDP:
         default=None,
     )
 
+    def __hash__(self):
+        return id(self)
+
     @property
     def discount(self):
         return self.original_mdp.discount
