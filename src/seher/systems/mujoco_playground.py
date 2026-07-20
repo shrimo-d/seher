@@ -67,7 +67,7 @@ class MujocoPlaygroundMDP:
         return jnp.array([-state.reward])
 
     def empty_control(self) -> jax.Array:  # noqa: D102
-        return jnp.empty(self.env.action_size)
+        return jnp.zeros(self.env.action_size)
 
     @staticmethod
     def from_registry(task_name: str) -> "MujocoPlaygroundMDP":

@@ -6,8 +6,9 @@ import flax.struct
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import numpy as np
 
-from seher.simulate import simulate
+from seher.simulate import make_simulate_prejitted, simulate
 from seher.systems.lqr import LQRState, make_simple_2d_lqr
 
 
@@ -20,6 +21,21 @@ class SimplePolicy:
 
     def __call__(self, carry, obs, control, key):  # noqa: D102
         return None, jnp.zeros(1)
+
+
+@flax.struct.dataclass
+class StatefulRandomPolicy:
+    """Policy exercising RNG, carry, observation, and previous control."""
+
+    def initial_carry(self):  # noqa: D102
+        return jnp.array(0)
+
+    def __call__(self, carry, obs, control, key):  # noqa: D102
+        noise = 0.05 * jr.normal(key, shape=(1,))
+        new_control = jnp.tanh(
+            -0.1 * obs.x[:1] + 0.2 * control + 0.01 * carry + noise
+        )
+        return carry + 1, new_control
 
 
 def test_lqr_basic():
@@ -107,3 +123,37 @@ def test_lqr_batch_simulation():
     except (TypeError, ValueError) as e:
         print(f"Batch JIT compilation failed with error: {e}")
         assert False, "unhashable" in str(e) or "hash" in str(e)
+
+
+def test_prejitted_simulation_matches_standard_and_is_reusable():
+    """A reused pre-JIT runner matches independent standard simulations."""
+    lqr = make_simple_2d_lqr(noise_scale=0.1)
+    policy = StatefulRandomPolicy()
+    n_steps = 8
+    simulate_prejitted = make_simulate_prejitted(lqr, policy, n_steps)
+
+    for state_seed, rollout_seed in ((10, 20), (11, 21)):
+        initial_state = lqr.init(jr.PRNGKey(state_seed))
+        key = jr.PRNGKey(rollout_seed)
+        expected = simulate(
+            lqr,
+            policy,
+            n_steps=n_steps,
+            key=key,
+            initial_state=initial_state,
+        )
+        actual = simulate_prejitted(
+            key=key,
+            initial_state=initial_state,
+        )
+
+        jax.tree.map(
+            lambda expected_leaf, actual_leaf: np.testing.assert_allclose(
+                actual_leaf,
+                expected_leaf,
+                rtol=1e-6,
+                atol=1e-7,
+            ),
+            expected,
+            actual,
+        )

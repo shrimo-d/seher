@@ -576,7 +576,7 @@ class StateEstimatorMDPState:
     latent: jax.Array
     est: State
     se_carry: StateEstimatorCarry
-
+    last_unc: Any = field(default_factory=lambda: jnp.array(0.0))
 
 @dataclass
 class StateEstimatorMDP:

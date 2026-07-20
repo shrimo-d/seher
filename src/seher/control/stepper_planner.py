@@ -8,7 +8,7 @@ from flax.struct import dataclass, field
 
 from ..jax_util import tree_stack
 from ..types import MDP, JaxRandomKey, Stepper, StepperCarry
-from .mpc import MPCPlanner, calc_costs_of_plan
+from .mpc import MPCPlanner, calc_cost_only_of_plan
 
 GaussianMPPICarry = TypeVar("GaussianMPPICarry")
 
@@ -99,7 +99,7 @@ class StepperPlanner[State]:
             key: JaxRandomKey,
         ) -> tuple[jax.Array, None]:
             plan = self.decode_plan(parameter)
-            return calc_costs_of_plan(
+            return calc_cost_only_of_plan(
                 self.mdp,
                 plan,
                 problem_data,

@@ -111,6 +111,18 @@ def ars_search_direction[Parameters, ProblemData, Auxiliary](
             right_candidates,
         )
         losses, auxs = eval_parameters(candidates, key)
+        #^Comment line above out and uncomment the part below for deterministic rollouts
+        #Non-deterministic debug test:
+        #def eval_one(parameter):
+        #    loss_val, aux = loss(
+        #        parameter=parameter,
+        #        problem_data=problem_data,
+        #        key=key,
+        #    )
+        #    return loss_val, aux
+
+        #losses, auxs = jax.lax.map(eval_one, candidates)
+        #END
         left_losses, right_losses = jnp.split(losses, 2, 0)
 
     best_losses = jnp.minimum(left_losses, right_losses)

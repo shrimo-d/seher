@@ -5,16 +5,12 @@ import numpy as np
 
 from flax.struct import dataclass
 from typing import Callable, Any
-import functools
-import optax
 
 from seher.types import MDP
 from seher.simulate import simulate
 from seher.models.random_policy import RandomPolicy, RandomWalkPolicy
-from seher.control.mpc import MPCPolicy
-from seher.control.stepper_planner import StepperPlanner
-from seher.ars import ars_value_and_grad
-from seher.stepper.optax import OptaxOptimizer
+
+from policies import create_ars_optimizer, create_mpc_policy
 
 @dataclass
 class RandomPosPolicy:
@@ -96,46 +92,34 @@ def memory_efficient_dataset(mdp, policy, n_traj, n_steps, key, blocksize=500):
     )
 
 
-def create_mpc_policy(mdp, n_iter, n_plan_steps, n_perturbations, top_k):
-    stepper = StepperPlanner(
-        mdp=mdp,
-        n_iter=n_iter,
-        n_plan_steps=n_plan_steps,
-        warm_start=True,
-        optimizer=OptaxOptimizer(
-            objective=None,
-            optimizer=optax.adam(0.03),
-            value_and_grad=functools.partial(
-                ars_value_and_grad,
-                std=0.2,
-                n_perturbations=n_perturbations,
-                top_k=top_k,
-            ),
-        ),
-    )
-    return MPCPolicy(mdp=mdp, planner=stepper)
-
 def create_policy_mix_dataset(mdp, n_traj, n_steps, key, n_plan_steps=5, n_iter=3, n_perturbations=4, top_k=2, std=0.05):
-    mpc_policy = create_mpc_policy(mdp, n_iter, n_plan_steps, n_perturbations, top_k)
+    optimizer = create_ars_optimizer(
+        std=std,
+        n_perturbations=n_perturbations,
+        top_k=top_k,
+    )
+    #mpc_policy = create_mpc_policy(mdp, n_iter, n_plan_steps, optimizer)
     neg_policy = RandomNegPolicy(mdp)
     pos_policy = RandomPosPolicy(mdp)
     wak_policy = RandomWalkPolicy(mdp)
     rdm_policy = RandomPolicy(mdp)
     mpc_key, neg_key, pos_key, wak_key, rdm_key, noise_key = jr.split(key, 6)
 
-    mpc_obs, mpc_act, mpc_true = memory_efficient_dataset(mdp, mpc_policy, int(0.2*n_traj), n_steps, mpc_key)
+    #mpc_obs, mpc_act, mpc_true = memory_efficient_dataset(mdp, mpc_policy, int(0.1*n_traj), n_steps, mpc_key)
 
-    neg_obs, neg_act, neg_true = memory_efficient_dataset(mdp, neg_policy, int(0.05*n_traj), n_steps, neg_key)
+    neg_obs, neg_act, neg_true = memory_efficient_dataset(mdp, neg_policy, int(0.15*n_traj), n_steps, neg_key)
 
-    pos_obs, pos_act, pos_true = memory_efficient_dataset(mdp, pos_policy, int(0.05*n_traj), n_steps, pos_key)
+    pos_obs, pos_act, pos_true = memory_efficient_dataset(mdp, pos_policy, int(0.15*n_traj), n_steps, pos_key)
 
     wak_obs, wak_act, wak_true = memory_efficient_dataset(mdp, wak_policy, int(0.35*n_traj), n_steps, wak_key)
 
     rdm_obs, rdm_act, rdm_true = memory_efficient_dataset(mdp, rdm_policy, int(0.35*n_traj), n_steps, rdm_key)
 
-    obs = jnp.concatenate([mpc_obs, neg_obs, pos_obs, wak_obs, rdm_obs], axis=0)
-    act = jnp.concatenate([mpc_act, neg_act, pos_act, wak_act, rdm_act], axis=0)
-    true = jnp.concatenate([mpc_true, neg_true, pos_true, wak_true, rdm_true], axis=0)
+    #obs = jnp.concatenate([mpc_obs, neg_obs, pos_obs, wak_obs, rdm_obs], axis=0)
+    #act = jnp.concatenate([mpc_act, neg_act, pos_act, wak_act, rdm_act], axis=0)
+    #true = jnp.concatenate([mpc_true, neg_true, pos_true, wak_true, rdm_true], axis=0)
+    obs = jnp.concatenate([neg_obs, pos_obs, wak_obs, rdm_obs], axis=0)
+    act = jnp.concatenate([neg_act, pos_act, wak_act, rdm_act], axis=0)
+    true = jnp.concatenate([neg_true, pos_true, wak_true, rdm_true], axis=0)
 
     return obs, act, true
-

@@ -71,7 +71,7 @@ class GaussianMPPIOptimizer[ProblemData](
 
     objective: ObjectiveFunction | None
     n_candidates: int = field(pytree_node=False)
-    top_k: int
+    top_k: int = field(pytree_node=False)
     initial_loc: jax.Array
     initial_scale: jax.Array
     warm_start: bool = True
@@ -122,7 +122,7 @@ class GaussianMPPIOptimizer[ProblemData](
         best = candidates[best_idxs]
         best_costs = total_costs[best_idxs]
 
-        weights = jax.nn.softmax(-best_costs / self.temperature).reshape(
+        weights = jax.nn.softmax(-best_costs * self.temperature).reshape(
             (-1, 1, 1)
         )
         loc = (best * weights).sum(0)
