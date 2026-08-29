@@ -17,6 +17,56 @@ from ..types import (
 )
 
 
+def sample_bounded_gaussian(
+    key: JaxRandomKey,
+    loc: jax.Array,
+    scale: jax.Array,
+    lower: jax.Array,
+    upper: jax.Array,
+    n_samples: int,
+) -> jax.Array:
+    """Sample a diagonal Gaussian truncated to a parameter box.
+
+    Unlike clipping unconstrained Gaussian samples, truncation does not map an
+    arbitrarily large tail of the search distribution onto a flat boundary.
+    ``scale`` remains expressed in parameter units and all returned samples
+    satisfy the supplied bounds.
+    """
+    lower = jnp.broadcast_to(jnp.asarray(lower, dtype=loc.dtype), loc.shape)
+    upper = jnp.broadcast_to(jnp.asarray(upper, dtype=loc.dtype), loc.shape)
+    scale = jnp.broadcast_to(jnp.asarray(scale, dtype=loc.dtype), loc.shape)
+    loc = jnp.clip(loc, lower, upper)
+
+    # A zero scale or zero-width interval represents a deterministic
+    # coordinate.  Give those entries benign sampling bounds and replace them
+    # after drawing so truncated_normal never sees an empty interval.
+    sampled_coordinate = (scale > 0) & (upper > lower)
+    safe_scale = jnp.where(sampled_coordinate, scale, jnp.ones_like(scale))
+    standardized_lower = (lower - loc) / safe_scale
+    standardized_upper = (upper - loc) / safe_scale
+    standardized_lower = jnp.where(
+        sampled_coordinate, standardized_lower, -jnp.ones_like(loc)
+    )
+    standardized_upper = jnp.where(
+        sampled_coordinate, standardized_upper, jnp.ones_like(loc)
+    )
+    noise = jr.truncated_normal(
+        key,
+        lower=standardized_lower,
+        upper=standardized_upper,
+        shape=(n_samples, *loc.shape),
+        dtype=loc.dtype,
+    )
+    candidates = loc[jnp.newaxis] + scale[jnp.newaxis] * noise
+    candidates = jnp.where(
+        sampled_coordinate[jnp.newaxis], candidates, loc[jnp.newaxis]
+    )
+
+    # Guard only against floating-point roundoff in the affine transform.  The
+    # distribution itself has already been sampled inside the interval.
+    return jnp.clip(candidates, lower, upper)
+
+
 @dataclass
 class GaussianMPPIOptimizerCarry(StepperCarry[jax.Array]):
     """Carry for a `GaussianMPPIOptimizer` instance.
@@ -66,6 +116,11 @@ class GaussianMPPIOptimizer[ProblemData](
         `temperature` to control the sharpness. Higher temperatures
         result in sharper contributions, i.e. for -> oo this would be the same
         as top 1, while for 0 it is a uniform contribution.
+    parameter_min:
+        Optional element-wise lower bound for sampled parameters.  Bounds are
+        normally supplied automatically by ``StepperPlanner`` from its MDP.
+    parameter_max:
+        Optional element-wise upper bound for sampled parameters.
 
     """
 
@@ -77,6 +132,28 @@ class GaussianMPPIOptimizer[ProblemData](
     warm_start: bool = True
     min_scale: float = 0.1
     temperature: float = 0.0
+    parameter_min: jax.Array | None = None
+    parameter_max: jax.Array | None = None
+
+    def __post_init__(self) -> None:
+        """Validate that parameter bounds are configured as a pair."""
+        if (self.parameter_min is None) != (self.parameter_max is None):
+            raise ValueError(
+                "parameter_min and parameter_max must either both be set or "
+                "both be None"
+            )
+
+    def with_parameter_bounds(
+        self, lower: jax.Array, upper: jax.Array
+    ) -> "GaussianMPPIOptimizer[ProblemData]":
+        """Return an optimizer constrained to an element-wise parameter box."""
+        return self.replace(parameter_min=lower, parameter_max=upper)
+
+    def project_parameter(self, parameter: jax.Array) -> jax.Array:
+        """Project externally supplied parameters into configured bounds."""
+        if self.parameter_min is None:
+            return parameter
+        return jnp.clip(parameter, self.parameter_min, self.parameter_max)
 
     # TODO: adapt the signature to return GaussianMPPIOptimizerCarry and
     # pyright still passes.
@@ -85,6 +162,7 @@ class GaussianMPPIOptimizer[ProblemData](
         sample_parameter: jax.Array,
     ) -> StepperCarry[jax.Array]:
         initial_loc = jnp.zeros_like(sample_parameter) + self.initial_loc
+        initial_loc = self.project_parameter(initial_loc)
         initial_scale = jnp.zeros_like(sample_parameter) + self.initial_scale
 
         return GaussianMPPIOptimizerCarry(
@@ -107,13 +185,24 @@ class GaussianMPPIOptimizer[ProblemData](
 
         draw_key, eval_key, key = jr.split(key, 3)
         # Draw candidates.
-        candidates = (
-            jr.normal(
-                shape=(self.n_candidates, *carry.current.shape), key=draw_key
+        if self.parameter_min is None:
+            candidates = (
+                jr.normal(
+                    shape=(self.n_candidates, *carry.current.shape),
+                    key=draw_key,
+                )
+                * carry.scale[jnp.newaxis]
+                + carry.current[jnp.newaxis]
             )
-            * carry.scale[jnp.newaxis]
-            + carry.current[jnp.newaxis]
-        )
+        else:
+            candidates = sample_bounded_gaussian(
+                key=draw_key,
+                loc=carry.current,
+                scale=carry.scale,
+                lower=self.parameter_min,
+                upper=self.parameter_max,
+                n_samples=self.n_candidates,
+            )
         get_costs = jax.vmap(self.objective, in_axes=(0, None, None))
         total_costs, _ = get_costs(candidates, problem_data, eval_key)
 
@@ -126,6 +215,7 @@ class GaussianMPPIOptimizer[ProblemData](
             (-1, 1, 1)
         )
         loc = (best * weights).sum(0)
+        loc = self.project_parameter(loc)
         scale = (weights * (best - loc) ** 2).sum(0) ** 0.5
         scale = jnp.maximum(scale, self.min_scale)
 

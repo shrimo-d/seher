@@ -63,12 +63,20 @@ class StepperPlanner[State]:
         if self.n_iter <= 0:
             raise ValueError("n_iter needs to be greater than 0")
 
+    def _bounded_optimizer(self):
+        """Bind MDP control bounds when the optimizer supports them."""
+        with_bounds = getattr(self.optimizer, "with_parameter_bounds", None)
+        if with_bounds is None:
+            return self.optimizer
+        return with_bounds(self.mdp.control_min, self.mdp.control_max)
+
     def initial_carry(self) -> StepperPlannerCarry:  # noqa: D102
         sample_parameter = tree_stack(
             [self.mdp.empty_control() for _ in range(self.n_plan_steps)]
         )
+        optimizer = self._bounded_optimizer()
         return StepperPlannerCarry(
-            self.optimizer.initial_carry(sample_parameter=sample_parameter)
+            optimizer.initial_carry(sample_parameter=sample_parameter)
         )
 
     initial_carry.__doc__ = MPCPlanner.initial_carry.__doc__
@@ -79,13 +87,18 @@ class StepperPlanner[State]:
         carry: StepperPlannerCarry,
         key: JaxRandomKey,
     ) -> StepperPlannerCarry:
+        optimizer = self._bounded_optimizer()
         new_carry = self.initial_carry()
 
         if self.warm_start:
+            warm_current = new_carry.stepper_carry.current.at[:-1].set(
+                carry.stepper_carry.current[1:]
+            )
+            project_parameter = getattr(
+                optimizer, "project_parameter", lambda parameter: parameter
+            )
             new_stepper_carry = new_carry.stepper_carry.replace(  # type: ignore
-                current=new_carry.stepper_carry.current.at[:-1].set(
-                    carry.stepper_carry.current[1:]
-                ),
+                current=project_parameter(warm_current),
             )
             new_carry = new_carry.replace(  # type: ignore
                 stepper_carry=new_stepper_carry
@@ -106,7 +119,7 @@ class StepperPlanner[State]:
                 key,
             ), None
 
-        optimizer = self.optimizer.replace(objective=objective)  # type: ignore
+        optimizer = optimizer.replace(objective=objective)  # type: ignore
 
         def body_fun(_, val):
             carry_val, key_val = val
