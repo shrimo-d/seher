@@ -5,6 +5,7 @@ from typing import Callable, Protocol
 
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 from flax.struct import dataclass, field
 from jax.tree import map as tree_map
 
@@ -39,6 +40,9 @@ def calc_costs_of_plan(
     Scalar cost.
 
     """
+    if getattr(mdp, "successor_cost", False):
+        return calc_cost_only_of_plan(mdp, plan, initial_state, key)
+
     n_plan_steps = plan.shape[0]
     open_loop_policy = OpenLoopPolicy[State](plan=plan)
     history = simulate(
@@ -49,6 +53,48 @@ def calc_costs_of_plan(
         initial_state=initial_state,
     )
     total_cost = history.costs.sum()
+    return total_cost
+
+
+@functools.partial(jax.jit, static_argnames=("mdp",))
+def calc_cost_only_of_plan(
+    mdp: MDP[State, jax.Array, jax.Array],
+    plan: jax.Array,
+    initial_state: State,
+    key: JaxRandomKey,
+) -> jax.Array:
+    """Return a plan's cost without materializing its rollout history."""
+
+    def scan_step(carry, control):
+        state, key, total_cost = carry
+        key, transit_key, cost_key = jr.split(key, 3)
+
+        if getattr(mdp, "successor_cost", False):
+            next_state = mdp.transit(
+                state=state, control=control, key=transit_key
+            )
+            transition_cost = getattr(mdp, "transition_cost", None)
+            cost = (
+                mdp.cost(state=next_state, control=control, key=cost_key)
+                if transition_cost is None
+                else transition_cost(
+                    state=state,
+                    control=control,
+                    next_state=next_state,
+                    key=cost_key,
+                )
+            )
+        else:
+            cost = mdp.cost(state=state, control=control, key=cost_key)
+            next_state = mdp.transit(
+                state=state, control=control, key=transit_key
+            )
+
+        return (next_state, key, total_cost + cost.sum()), None
+
+    init = (initial_state, key, jnp.array(0.0))
+    (_, _, total_cost), _ = jax.lax.scan(scan_step, init, plan)
+
     return total_cost
 
 

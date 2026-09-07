@@ -236,6 +236,107 @@ def simulate(
     return result
 
 
+def make_simulate_prejitted(
+    mdp: MDP[State, Control, Cost],
+    policy: Policy[State, PolicyCarry, Control],
+    n_steps: int,
+):
+    """Return one reusable, JIT-compiled simulation function.
+
+    This is an opt-in alternative to :func:`simulate` for workloads that run
+    the same MDP and policy repeatedly with equally shaped inputs. The returned
+    function is compiled on its first call and reuses that executable on later
+    calls instead of constructing new JIT wrappers for every rollout.
+
+    The returned function accepts ``key``, ``initial_state``, and an optional
+    ``initial_policy_carry``. It intentionally requires an initial state and
+    does not support callbacks. Every call starts with ``mdp.empty_control()``
+    and, unless supplied explicitly, a fresh default value from
+    ``policy.initial_carry()``.
+
+    Parameters
+    ----------
+    mdp:
+        System to rollout on.
+    policy:
+        Actor from which the controls come.
+    n_steps:
+        Number of time steps to simulate for.
+
+    Returns
+    -------
+    Callable that performs a simulation for one key and initial state.
+
+    """
+    @jax.jit
+    def compiled_simulate(
+        key,
+        initial_state,
+        initial_policy_carry,
+        initial_control,
+    ):
+        # Match simulate(): it reserves an initialization key even when an
+        # explicit initial state is supplied.
+        _, key = jr.split(key)
+
+        def scan_step(carry, _):
+            i_step, state, policy_carry, control, key = carry
+            policy_key, transit_key, cost_key, key = jr.split(key, 4)
+
+            policy_carry, control = policy(
+                carry=policy_carry,
+                obs=state,
+                control=control,
+                key=policy_key,
+            )
+            cost = mdp.cost(state=state, control=control, key=cost_key)
+            state_p1 = mdp.transit(
+                state=state,
+                control=control,
+                key=transit_key,
+            )
+
+            new_carry = (i_step + 1, state_p1, policy_carry, control, key)
+            outputs = (state_p1, control, cost, policy_carry)
+            return new_carry, outputs
+
+        initial_carry = (
+            0,
+            initial_state,
+            initial_policy_carry,
+            initial_control,
+            key,
+        )
+        _, (states, controls, costs, policy_carries) = jax.lax.scan(
+            scan_step,
+            initial_carry,
+            None,
+            length=n_steps,
+        )
+        return History(
+            states=states,
+            controls=controls,
+            costs=costs,
+            policy_carries=policy_carries,
+        )
+
+    def simulate_prejitted(
+        key,
+        initial_state,
+        initial_policy_carry=None,
+    ):
+        if initial_policy_carry is None:
+            initial_policy_carry = policy.initial_carry()
+        return compiled_simulate(
+            key,
+            initial_state,
+            initial_policy_carry,
+            mdp.empty_control(),
+        )
+
+    return simulate_prejitted
+
+
 def init_or_persist(
     mdp: MDP[State, Control, Cost],
     policy: Policy[State, PolicyCarry, Control],

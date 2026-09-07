@@ -25,6 +25,10 @@ Some features.
  - Policy gradients based on score function estimation.
  - Interface to mujoco_playground.
 
+ # installation
+
+ this version uses a fork of mujoco_playground with a custom environment (link missing). For this to work, mujoco and mujoco-mjx need to be reverted to 3.5.0!
+
 
 ## Roadmap
 

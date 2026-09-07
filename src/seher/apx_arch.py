@@ -102,6 +102,75 @@ class MLP:
 
 
 @dataclass
+class GRUCell:
+    """Gated-recurrent unit as a callable.
+    
+    Attributes
+    ----------
+    Wz:
+        Weights for the update gate.
+    bz:
+        Biases for the update gate.
+    Wr:
+        Weights for the reset gate.
+    br:
+        Biases for the reset gate.
+    Wh:
+        Weights for the candidate hidden state.
+    bh:
+        Biases for the candidate hidden state.
+    w_init:
+        Initializer for the weights.
+    b_init:
+        Initializer for the biases.
+    
+    """
+    Wz: jax.Array
+    bz: jax.Array
+    Wr: jax.Array
+    br: jax.Array
+    Wh: jax.Array
+    bh: jax.Array
+
+    @classmethod
+    def make(
+        cls,
+        in_dim: int,
+        hidden_dim: int,
+        key: jax.Array,
+        w_init: Initializer = lambda key, shape: jr.uniform(
+            key=key, shape=shape, minval=-0.1, maxval=0.1
+        ),
+        b_init: Initializer = lambda key, shape: jr.uniform(
+            key=key, shape=shape
+        )
+    ) -> "GRUCell":
+        """Return GRUCell instance with parameters drawn according to `key`."""
+        k1, k2, k3, k4, k5, k6 = jr.split(key, 6)
+        hx_dim = hidden_dim + in_dim
+
+        Wz = w_init(k1, (hx_dim, hidden_dim))
+        bz = b_init(k2, (hidden_dim,))
+        Wr = w_init(k3, (hx_dim, hidden_dim))
+        br = b_init(k4, (hidden_dim,))
+        Wh = w_init(k5, (hx_dim, hidden_dim))
+        bh = b_init(k6, (hidden_dim,))
+
+        return cls(Wz=Wz, bz=bz, Wr=Wr, br=br, Wh=Wh, bh=bh)
+    
+    def __call__(self, h: jax.Array, x: jax.Array) -> jax.Array:
+        """Perform forward pass of GRUCell."""
+        hx = jnp.concatenate([h,x], axis=-1)
+
+        z = jax.nn.sigmoid(hx @ self.Wz + self.bz)
+        r = jax.nn.sigmoid(hx @ self.Wr + self.br)
+
+        rhx = jnp.concatenate([r * h, x], axis=-1)
+        h_tilde = jnp.tanh(rhx @ self.Wh + self.bh)
+        return (1.0 - z) * h + z * h_tilde
+
+
+@dataclass
 class StaticMLPPolicy[Observation, Control]:
     """Adapt an MLP to be a static policy for an MDP or so.
 

@@ -7,6 +7,9 @@ wheels/
 *.egg-info
 .coverage
 
+# mujoco generated
+MUJOCO_LOG.TXT
+
 # venv
 .venv
 
@@ -14,3 +17,14 @@ wheels/
 *.sqlite3
 *.dill
 *.gif
+*.png
+*.msgpack
+runs/
+examples/pendulum_priv_info/policies
+examples/pendulum_priv_info/artifacts
+*.json
+*.npz
+**/outputs
+
+# Mac files
+.DS_Store

@@ -11,8 +11,10 @@ Control = TypeVar("Control")
 Cost = TypeVar("Cost")
 Parameter = TypeVar("Parameter")
 PolicyCarry = TypeVar("PolicyCarry")
+StateEstimatorCarry = TypeVar("StateEstimateCarry")
 ProblemData = TypeVar("ProblemData")
 State = TypeVar("State")
+Observation = TypeVar("Observation")
 
 
 class MDP[State, Control, Cost](Protocol):
@@ -404,6 +406,77 @@ class StateCritic[State](Protocol):
         Returns
         -------
         The approximate cost-to-go.
+
+        """
+        ...
+
+
+class StateEstimator[State, Observation, StateEstimatorCarry, Control](Protocol):
+    """Estimator of the state given previous observations and/or actions."""
+
+    def initial_carry(self):
+        """Return the carry for the first time step.
+        
+        Needed to keep history of observations/actions.
+        
+        """
+        ...
+    
+    def __call__(
+        self,
+        carry: StateEstimatorCarry,
+        obs: Observation,
+        control: Control,
+        key: JaxRandomKey,
+    ) -> tuple[StateEstimatorCarry, State]:
+        """Apply the state estimator to a new observation.
+        
+        Parameters
+        ----------
+        carry:
+            Information from the state estimators last call, needed for history.
+        obs:
+            New observation to estimate state from.
+        control:
+            Last control applied to the sequential problem.
+        key:
+            Jax RNG for all downstream stochasticity.
+        
+        Returns
+        -------
+        Carry
+            Captures the current state of the state estimator.
+        State
+            State estimate compatible with your MDP.
+        
+        """
+        ...
+
+
+class LatentAdapter[State](Protocol):
+    """Adapter which adapts output of a StateEstimator into
+    the needed latent representation.
+    
+    Allows for use of StateEstimators that simply return a State,
+    distribution parameters or different instructions for how to build
+    the latent representation that is needed.
+
+    """
+    latent_dim: int
+
+    def __call__(self, est: State, key: JaxRandomKey) -> jax.Array:
+        """Return the correct latent represantation of your StateEstimate.
+        
+        Parameters
+        ----------
+        est:
+            State estimate
+        key:
+            RNG for all downstream stochasticity.
+        
+        Returns
+        -------
+        The latent representation needed.
 
         """
         ...
