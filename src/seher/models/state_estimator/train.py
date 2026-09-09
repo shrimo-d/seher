@@ -216,6 +216,7 @@ def train_estimator(
     key: JaxRandomKey,
     verbose: bool = False,
     validation_data=None,
+    checkpoint_callback: Callable | None = None,
 ):
     """Supervised training of a StateEstimator(Ensemble).
     
@@ -244,6 +245,9 @@ def train_estimator(
     validation_data:
         Optional ``(obs, control, true)`` tuple. If provided, the validation
         loss is evaluated whenever the training loss is recorded.
+    checkpoint_callback:
+        Optional ``callback(completed_updates, model)`` called after each
+        optimizer update. It does not reset optimizer state or consume keys.
     
     Returns
     -------
@@ -286,6 +290,9 @@ def train_estimator(
             true_b = true[idx]
 
         model, opt_state, loss = step_fn(model, opt_state, obs_b, act_b, true_b, k_step)
+
+        if checkpoint_callback is not None:
+            checkpoint_callback(i + 1, model)
 
         if i % 100 == 0 or i == n_iterations - 1:
             val = float(loss)
